@@ -295,6 +295,18 @@ def main():
     mc2[4].metric("Volga", fmt(res["volga"], 4))
     mc2[5].metric("Charm", fmt(res["charm"], 6))
 
+    # OptionStrat link
+    from datetime import datetime, timedelta
+    exp_date = (datetime.now() + timedelta(days=dte)).strftime("%Y-%m-%d")
+    os_url = bs.optionstrat_url(ticker, [{
+        "strike": K_found,
+        "option_type": opt_type,
+        "expiration": exp_date,
+        "long": sign > 0,
+    }])
+    if os_url:
+        st.caption(f"[OptionStrat]({os_url})")
+
     # ================================================================
     # SECTION 4: WHAT-IF SCENARIOS
     # ================================================================

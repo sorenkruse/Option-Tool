@@ -473,3 +473,74 @@ def solve_strike_for_vega(target_vega_pct, S, T, r, sigma, q, option_type):
         # OTM puts: K < S
         return _solve_strike(f, target_vega_pct, S, T, r, sigma, q, option_type,
                              K_low=S * 0.3, K_high=K_atm)
+
+
+# ============================================================================
+# OptionStrat URL Generation
+# ============================================================================
+
+# OptionStrat ticker mapping
+_OPTIONSTRAT_SYMBOLS = {
+    "SPX": "SPXW", "GSPC": "SPXW", "^SPX": "SPXW", "^GSPC": "SPXW",
+    "NDX": "NDXP", "^NDX": "NDXP",
+    "SPY": "SPY", "QQQ": "QQQ", "IWM": "IWM", "AAPL": "AAPL",
+    "MSFT": "MSFT", "AMZN": "AMZN", "GOOGL": "GOOGL", "META": "META",
+    "TSLA": "TSLA", "NVDA": "NVDA",
+}
+
+
+def optionstrat_url(symbol: str, legs: list) -> str | None:
+    """
+    Build an OptionStrat URL for any option strategy.
+
+    Args:
+        symbol: Underlying symbol (e.g. "SPX", "^SPX", "SPY")
+        legs: List of dicts, each with:
+            - strike: int or float
+            - option_type: "call" or "put" (or "C"/"P")
+            - expiration: "YYYY-MM-DD" string
+            - long: bool (True = bought, False = sold)
+
+    Returns:
+        URL string or None if no legs.
+
+    Example:
+        legs = [
+            {"strike": 6810, "option_type": "put",  "expiration": "2026-03-19", "long": True},
+            {"strike": 6870, "option_type": "put",  "expiration": "2026-03-09", "long": False},
+            {"strike": 7000, "option_type": "call", "expiration": "2026-03-09", "long": True},
+        ]
+        url = optionstrat_url("SPX", legs)
+        # https://optionstrat.com/build/custom/SPX/
+        #   .SPXW260319P6810,-.SPXW260309P6870,.SPXW260309C7000
+    """
+    if not legs:
+        return None
+
+    sym = symbol.upper().replace("^", "")
+    leg_sym = _OPTIONSTRAT_SYMBOLS.get(sym, sym)
+    # Also try with ^ prefix
+    if leg_sym == sym:
+        leg_sym = _OPTIONSTRAT_SYMBOLS.get(f"^{sym}", sym)
+
+    parts = []
+    for leg in legs:
+        strike = int(float(leg["strike"]))
+
+        # option type: normalise to C/P
+        ot = leg.get("option_type", leg.get("type", "C"))
+        ot = ot[0].upper()  # "call" -> "C", "put" -> "P"
+
+        # expiration: YYYY-MM-DD -> YYMMDD
+        exp = leg["expiration"]
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.strptime(exp, "%Y-%m-%d")
+            date_code = dt.strftime("%y%m%d")
+        except Exception:
+            date_code = exp.replace("-", "")
+
+        prefix = "" if leg.get("long", True) else "-"
+        parts.append(f"{prefix}.{leg_sym}{date_code}{ot}{strike}")
+
+    return f"https://optionstrat.com/build/custom/{sym}/{','.join(parts)}"

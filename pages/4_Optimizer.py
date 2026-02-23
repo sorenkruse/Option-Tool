@@ -626,6 +626,16 @@ def _display(res):
     mc2[4].metric("IV", f"{best['iv']*100:.1f}%")
     mc2[5].metric("Dist", f"{best['distance_pct']:.1f}%")
 
+    # OptionStrat link
+    os_url = bs.optionstrat_url(res["symbol"], [{
+        "strike": int(best["strike"]),
+        "option_type": res["opt_type"],
+        "expiration": best["expiration"],
+        "long": False,
+    }])
+    if os_url:
+        st.caption(f"[OptionStrat]({os_url})")
+
     # ---- P&L distribution of best ----
     if "mc_pnl_dist" in best and best["mc_pnl_dist"] is not None:
         st.markdown("---")

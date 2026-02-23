@@ -118,21 +118,13 @@ def find_strike_by_delta(target_delta, S, T, r, q, smile_df, opt_type, step):
 # ---------------------------------------------------------------------------
 
 def build_optionstrat_url(symbol, exp_date_str, call_strike, put_strike):
-    """Build OptionStrat analysis URL."""
-    sym = symbol.upper().replace("^", "")
-    # OptionStrat uses SPXW for SPX weeklies
-    leg_sym = "SPXW" if sym in ("SPX", "GSPC") else sym
-
-    try:
-        dt = datetime.strptime(exp_date_str, "%Y-%m-%d")
-        date_code = dt.strftime("%y%m%d")
-    except Exception:
-        date_code = exp_date_str.replace("-", "")
-
-    url = (f"https://optionstrat.com/build/custom/{sym}/"
-           f"-.{leg_sym}{date_code}C{call_strike},"
-           f"-.{leg_sym}{date_code}P{put_strike}")
-    return url
+    """Build OptionStrat analysis URL for short strangle."""
+    return bs.optionstrat_url(symbol, [
+        {"strike": call_strike, "option_type": "call",
+         "expiration": exp_date_str, "long": False},
+        {"strike": put_strike, "option_type": "put",
+         "expiration": exp_date_str, "long": False},
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +230,14 @@ def _compute(symbol, dte_input, target_delta):
     call_pop = norm.cdf(-bs._d2(S, call_k, T, r, call_iv, q)) * 100  # P(S < K)
     put_pop = norm.cdf(bs._d2(S, put_k, T, r, put_iv, q)) * 100     # P(S > K)
 
+    # Strangle PoP: P(K_put < S_T < K_call) at expiry
+    # = P(S > K_put) - P(S > K_call)
+    # Uses average IV of both legs for consistent lognormal distribution
+    avg_iv = (call_iv + put_iv) / 2
+    d2_put = bs._d2(S, put_k, T, r, avg_iv, q)
+    d2_call = bs._d2(S, call_k, T, r, avg_iv, q)
+    strangle_pop = (norm.cdf(d2_put) - norm.cdf(d2_call)) * 100
+
     return {
         "S": S, "spot_raw": spot, "vix": vix, "skew": skew,
         "r": r, "q": q, "T": T, "actual_dte": actual_dte,
@@ -247,6 +247,7 @@ def _compute(symbol, dte_input, target_delta):
         "call_res": call_res, "call_pop": call_pop,
         "put_k": put_k, "put_iv": put_iv, "put_delta": put_delta,
         "put_res": put_res, "put_pop": put_pop,
+        "strangle_pop": strangle_pop,
         "step": step, "scale": scale, "symbol": symbol,
         "target_delta": target_delta,
     }
@@ -262,7 +263,7 @@ def _display(res, symbol):
     dist_put = (1 - (put_k / S)) * 100
     combined_theta = call_res["theta_daily"] + put_res["theta_daily"]
     combined_premium = call_res["price"] + put_res["price"]
-    avg_pop = (res["call_pop"] + res["put_pop"]) / 2
+    strangle_pop = res["strangle_pop"]
 
     # ---- Header ----
     st.markdown(f"#### {symbol} @ {S:,.2f}  |  VIX: {res['vix']:.1f}  |  "
@@ -274,7 +275,7 @@ def _display(res, symbol):
     m2.metric("Put Strike", f"{put_k:,}", f"-{dist_put:.1f}%")
     m3.metric("Premium", f"${combined_premium:,.2f}")
     m4.metric("Theta/day", f"${combined_theta:,.2f}")
-    m5.metric("Avg PoP", f"{avg_pop:.1f}%")
+    m5.metric("PoP", f"{strangle_pop:.1f}%")
     m6.metric("SKEW", f"{res['skew']:.1f}" if not np.isnan(res["skew"]) else "N/A")
 
     # ---- Distribution chart ----
@@ -341,7 +342,7 @@ def _display(res, symbol):
                     f"{put_res['vega_pct']:.4f}",
                     f"{call_res['vega_pct']+put_res['vega_pct']:.4f}"],
         "PoP": [f"{res['call_pop']:.1f}%", f"{res['put_pop']:.1f}%",
-                f"{avg_pop:.1f}%"],
+                f"{strangle_pop:.1f}%"],
     })
     st.dataframe(greeks_df, use_container_width=True, hide_index=True)
 

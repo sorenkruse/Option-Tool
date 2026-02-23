@@ -307,6 +307,17 @@ def main():
             opt_type, mkt, result_a, result_b,
             "Implied Spot + Derived IV", "Yahoo Spot + Yahoo IV"
         )
+
+        # OptionStrat link
+        os_url = bs.optionstrat_url(ticker, [{
+            "strike": actual_strike,
+            "option_type": opt_type,
+            "expiration": data["expiration"],
+            "long": True,
+        }])
+        if os_url:
+            st.caption(f"[OptionStrat]({os_url})")
+
         st.divider()
 
     # --- Put-Call Parity ---
