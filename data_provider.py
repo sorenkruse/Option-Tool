@@ -7,12 +7,45 @@ Fetches from Yahoo Finance:
 - Dividend yield
 - Risk-free rate from Treasury yields
 - CBOE SKEW Index, VIX
+
+All Yahoo requests go through a TTL cache to minimise API calls.
+Default TTL: 5 minutes for prices, 10 minutes for chains/fundamentals.
 """
 
 import datetime
+import time
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+
+# ---------------------------------------------------------------------------
+# TTL Cache
+# ---------------------------------------------------------------------------
+
+_cache: dict = {}
+
+# TTL in seconds
+CACHE_TTL_PRICE = 300       # 5 min for spot, VIX, SKEW
+CACHE_TTL_CHAIN = 600       # 10 min for option chains
+CACHE_TTL_FUNDAMENTAL = 900  # 15 min for div yield, risk-free rate, RV
+
+
+def _cache_get(key: str):
+    """Return cached value if still valid, else None."""
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    value, expires = entry
+    if time.time() > expires:
+        del _cache[key]
+        return None
+    return value
+
+
+def _cache_set(key: str, value, ttl: int):
+    """Store value with TTL."""
+    _cache[key] = (value, time.time() + ttl)
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +78,12 @@ def _safe_int(val, default=0):
 # ---------------------------------------------------------------------------
 
 def get_spot_price(ticker: str) -> float:
-    """Get current spot price for a ticker."""
+    """Get current spot price for a ticker (cached)."""
+    key = f"spot:{ticker.upper()}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
     tk = yf.Ticker(ticker)
 
     # Try multiple approaches - yfinance API varies across versions
@@ -54,6 +92,7 @@ def get_spot_price(ticker: str) -> float:
             fi = tk.fast_info
             price = fi.get(attr, None) if hasattr(fi, "get") else getattr(fi, attr, None)
             if price is not None and not np.isnan(price) and price > 0:
+                _cache_set(key, float(price), CACHE_TTL_PRICE)
                 return float(price)
         except Exception:
             continue
@@ -61,7 +100,9 @@ def get_spot_price(ticker: str) -> float:
     # Fallback: history
     hist = tk.history(period="5d")
     if not hist.empty:
-        return float(hist["Close"].iloc[-1])
+        price = float(hist["Close"].iloc[-1])
+        _cache_set(key, price, CACHE_TTL_PRICE)
+        return price
 
     raise ValueError(f"Could not fetch price for {ticker}")
 
@@ -90,24 +131,21 @@ def resolve_spot_price(ticker: str) -> tuple:
 
 def get_dividend_yield(ticker: str) -> float:
     """
-    Get annualized dividend yield as a decimal (e.g., 0.012 for 1.2%).
-
-    Yahoo Finance returns:
-    - dividendYield: decimal (e.g., 0.0124) - CORRECT
-    - trailingAnnualDividendYield: decimal - CORRECT
-    - dividendRate / trailingAnnualDividendRate: DOLLAR amount per share - WRONG if used directly
-
-    We only use yield fields, not rate fields, and add sanity checks.
+    Get annualized dividend yield as a decimal (cached).
     """
     lookup_ticker = "SPY" if ticker.upper() in ("^SPX", "^GSPC", "SPX") else ticker
+    key = f"divyield:{lookup_ticker.upper()}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
 
     tk = yf.Ticker(lookup_ticker)
     try:
         info = tk.info
 
         # Try yield fields first (these are decimals: 0.0124 = 1.24%)
-        for key in ["dividendYield", "trailingAnnualDividendYield"]:
-            val = info.get(key)
+        for field in ["dividendYield", "trailingAnnualDividendYield"]:
+            val = info.get(field)
             if val is not None:
                 val = float(val)
                 if not np.isnan(val) and val > 0:
@@ -120,6 +158,7 @@ def get_dividend_yield(ticker: str) -> float:
                     if val > 0.20:
                         # Still too high - skip this value
                         continue
+                    _cache_set(key, val, CACHE_TTL_FUNDAMENTAL)
                     return val
 
         # Fallback: compute from dividendRate / price if available
@@ -131,10 +170,12 @@ def get_dividend_yield(ticker: str) -> float:
             if not np.isnan(rate) and not np.isnan(price) and price > 0 and rate > 0:
                 computed_yield = rate / price
                 if computed_yield < 0.20:
+                    _cache_set(key, computed_yield, CACHE_TTL_FUNDAMENTAL)
                     return computed_yield
 
     except Exception:
         pass
+    _cache_set(key, 0.0, CACHE_TTL_FUNDAMENTAL)
     return 0.0
 
 
@@ -144,13 +185,7 @@ def get_dividend_yield(ticker: str) -> float:
 
 def get_risk_free_rate(dte_days: int) -> float:
     """
-    Get risk-free rate from Treasury yields.
-
-    Yahoo tickers (yield in percentage points):
-    ^IRX = 13-week T-bill
-    ^FVX = 5-year Treasury
-    ^TNX = 10-year Treasury
-    ^TYX = 30-year Treasury
+    Get risk-free rate from Treasury yields (cached).
     """
     brackets = [
         (180,  "^IRX"),
@@ -165,15 +200,19 @@ def get_risk_free_rate(dte_days: int) -> float:
             target_ticker = ticker
             break
 
+    key = f"rfrate:{target_ticker}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
     try:
         tk = yf.Ticker(target_ticker)
         hist = tk.history(period="5d")
         if not hist.empty:
             raw_val = float(hist["Close"].iloc[-1])
-            # Yahoo Treasury yields are in percentage points (e.g., 4.5 = 4.5%)
             rate = raw_val / 100.0
-            # Sanity check
             if 0.0 < rate < 0.20:
+                _cache_set(key, rate, CACHE_TTL_FUNDAMENTAL)
                 return rate
     except Exception:
         pass
@@ -186,22 +225,32 @@ def get_risk_free_rate(dte_days: int) -> float:
 # ---------------------------------------------------------------------------
 
 def get_skew_index() -> float:
-    """Get current CBOE SKEW Index value."""
+    """Get current CBOE SKEW Index value (cached)."""
+    cached = _cache_get("skew")
+    if cached is not None:
+        return cached
     try:
         hist = yf.Ticker("^SKEW").history(period="5d")
         if not hist.empty:
-            return float(hist["Close"].iloc[-1])
+            val = float(hist["Close"].iloc[-1])
+            _cache_set("skew", val, CACHE_TTL_PRICE)
+            return val
     except Exception:
         pass
     return np.nan
 
 
 def get_vix() -> float:
-    """Get current VIX value."""
+    """Get current VIX value (cached)."""
+    cached = _cache_get("vix")
+    if cached is not None:
+        return cached
     try:
         hist = yf.Ticker("^VIX").history(period="5d")
         if not hist.empty:
-            return float(hist["Close"].iloc[-1])
+            val = float(hist["Close"].iloc[-1])
+            _cache_set("vix", val, CACHE_TTL_PRICE)
+            return val
     except Exception:
         pass
     return np.nan
@@ -212,7 +261,12 @@ def get_vix() -> float:
 # ---------------------------------------------------------------------------
 
 def get_options_chain(ticker: str, dte_target: int) -> dict:
-    """Fetch options chain for the expiration closest to the target DTE."""
+    """Fetch options chain for the expiration closest to the target DTE (cached)."""
+    key = f"chain:{ticker.upper()}:{dte_target}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
     tk = yf.Ticker(ticker)
 
     try:
@@ -243,13 +297,15 @@ def get_options_chain(ticker: str, dte_target: int) -> dict:
     exp_date = datetime.date.fromisoformat(best_exp)
     actual_dte = max((exp_date - today).days, 1)
 
-    return {
+    result = {
         "expiration": best_exp,
         "dte_actual": actual_dte,
         "dte_years": actual_dte / 365.0,
         "calls": chain.calls,
         "puts": chain.puts,
     }
+    _cache_set(key, result, CACHE_TTL_CHAIN)
+    return result
 
 
 def resolve_options_chain(ticker: str, dte: int) -> tuple:
@@ -629,8 +685,12 @@ def fetch_all_data(ticker: str, strike: float, dte: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_available_expirations(ticker: str) -> tuple:
-    """Get all available expiration date strings for a ticker.
-    Returns (list_of_expirations, ticker_used)."""
+    """Get all available expiration date strings for a ticker (cached)."""
+    key = f"expirations:{ticker.upper()}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
+
     is_spx = ticker.upper() in ("^SPX", "^GSPC", "SPX")
     tickers_to_try = SPX_OPTIONS_TICKERS + ["SPY"] if is_spx else [ticker]
 
@@ -639,7 +699,9 @@ def get_available_expirations(ticker: str) -> tuple:
             tk = yf.Ticker(t)
             exps = tk.options
             if exps:
-                return list(exps), t
+                result = (list(exps), t)
+                _cache_set(key, result, CACHE_TTL_CHAIN)
+                return result
         except Exception:
             continue
     return [], ticker
@@ -678,16 +740,23 @@ def fetch_chains_for_dte_range(ticker: str, dte_min: int, dte_max: int) -> tuple
         if dte_actual < dte_min or dte_actual > dte_max:
             continue
 
-        try:
-            chain = tk.option_chain(exp_str)
-        except Exception:
-            continue
+        # Cache individual chain by ticker + expiration
+        chain_key = f"rawchain:{chain_ticker.upper()}:{exp_str}"
+        chain_data = _cache_get(chain_key)
+        if chain_data is None:
+            try:
+                chain = tk.option_chain(exp_str)
+            except Exception:
+                continue
+            if chain.calls.empty and chain.puts.empty:
+                continue
+            chain_data = (chain.calls, chain.puts)
+            _cache_set(chain_key, chain_data, CACHE_TTL_CHAIN)
 
-        if chain.calls.empty and chain.puts.empty:
-            continue
+        calls_df, puts_df = chain_data
 
-        call_smile = build_smile_curve(chain.calls, working_spot)
-        put_smile = build_smile_curve(chain.puts, working_spot)
+        call_smile = build_smile_curve(calls_df, working_spot)
+        put_smile = build_smile_curve(puts_df, working_spot)
 
         if spy_fallback:
             if not call_smile.empty:
@@ -714,12 +783,7 @@ def fetch_chains_for_dte_range(ticker: str, dte_min: int, dte_max: int) -> tuple
 
 def get_realized_volatility(ticker: str, windows: list = None) -> dict:
     """
-    Compute realized (historical) volatility from daily close prices.
-
-    Uses close-to-close log returns, annualized.
-    Returns dict with rv for each window, plus the raw daily returns.
-
-    For SPX: uses ^GSPC which has reliable history.
+    Compute realized (historical) volatility from daily close prices (cached).
     """
     if windows is None:
         windows = [20, 30]
@@ -730,6 +794,11 @@ def get_realized_volatility(ticker: str, windows: list = None) -> dict:
         hist_ticker = "^GSPC"
     else:
         hist_ticker = ticker
+
+    key = f"rv:{hist_ticker.upper()}:{','.join(str(w) for w in windows)}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
 
     max_window = max(windows) + 10  # extra days for safety
     try:
@@ -754,4 +823,5 @@ def get_realized_volatility(ticker: str, windows: list = None) -> dict:
             result[f"rv_{w}"] = np.nan
 
     result["daily_returns"] = log_returns
+    _cache_set(key, result, CACHE_TTL_FUNDAMENTAL)
     return result
