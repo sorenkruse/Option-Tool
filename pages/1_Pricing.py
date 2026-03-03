@@ -212,15 +212,19 @@ def main():
         st.markdown("**Parameters**")
         ticker = st.text_input("Ticker", value="SPY",
                                help="e.g. SPY, ^SPX, AAPL, MSFT")
-        strike = st.number_input("Strike", value=580.0, min_value=0.01, step=5.0)
-        dte = st.number_input("DTE", value=30, min_value=1, max_value=1095, step=1)
+        strike = st.number_input("Strike", value=580.0, min_value=0.01, step=5.0,
+                                  help="Target strike price. Nearest available strike from the chain will be used.")
+        dte = st.number_input("DTE", value=30, min_value=1, max_value=1095, step=1,
+                               help="Days to expiration. The closest available expiration will be selected.")
 
         st.divider()
-        rate_mode = st.radio("Risk-Free Rate", ["Auto", "Manual"], horizontal=True)
+        rate_mode = st.radio("Risk-Free Rate", ["Auto", "Manual"], horizontal=True,
+                              help="Auto fetches Treasury yields matched to DTE. Manual lets you override.")
         manual_rate = None
         if rate_mode == "Manual":
             manual_rate = st.number_input("Rate (%)", value=4.5, min_value=0.0,
-                                          max_value=20.0, step=0.1) / 100.0
+                                          max_value=20.0, step=0.1,
+                                          help="Annual risk-free rate for BS pricing.") / 100.0
 
         st.divider()
         run = st.button("Calculate", type="primary", use_container_width=True)

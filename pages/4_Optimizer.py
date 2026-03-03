@@ -252,28 +252,36 @@ def main():
     # ---- Inputs ----
     c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX").upper()
+        symbol = st.text_input("Symbol", value="^SPX",
+                               help="Underlying symbol, e.g. ^SPX, SPY, AAPL.").upper()
     with c2:
-        dte_min = st.number_input("DTE min", value=20, min_value=5, max_value=180)
+        dte_min = st.number_input("DTE min", value=20, min_value=5, max_value=180,
+                                   help="Minimum days to expiration to scan.")
     with c3:
-        dte_max = st.number_input("DTE max", value=50, min_value=10, max_value=365)
+        dte_max = st.number_input("DTE max", value=50, min_value=10, max_value=365,
+                                   help="Maximum days to expiration to scan.")
     with c4:
         target_delta = st.number_input("|Delta|", value=0.15,
                                        min_value=0.03, max_value=0.45,
-                                       step=0.01, format="%.2f")
+                                       step=0.01, format="%.2f",
+                                       help="Target absolute delta. Lower = further OTM, safer but less premium. Typical: 0.10-0.20.")
     with c5:
-        opt_type_sel = st.selectbox("Type", ["Put", "Call"])
+        opt_type_sel = st.selectbox("Type", ["Put", "Call"],
+                                     help="Put = sell downside protection. Call = sell upside participation.")
 
     c6, c7, c8, c9 = st.columns([1, 1, 1, 1])
     with c6:
         tp_pct = st.number_input("Take Profit %", value=50, min_value=10,
-                                 max_value=90, step=5)
+                                 max_value=90, step=5,
+                                 help="Close when this % of max premium is captured. 50% = close at half premium.")
     with c7:
         sl_pct = st.number_input("Stop Loss %", value=200, min_value=50,
-                                 max_value=500, step=50)
+                                 max_value=500, step=50,
+                                 help="Close when loss reaches this % of premium received. 200% = stop at 2x premium.")
     with c8:
         n_paths = st.number_input("MC Paths", value=5000, min_value=1000,
-                                  max_value=20000, step=1000)
+                                  max_value=20000, step=1000,
+                                  help="Monte Carlo paths. More = accurate but slower. 3000-5000 usually sufficient.")
     with c9:
         rv_override = st.number_input(
             "RV Override % (0 = use actual)",

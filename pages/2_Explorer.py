@@ -151,9 +151,11 @@ def main():
 
     col_pos, col_ticker, col_load = st.columns([2, 2, 1])
     with col_pos:
-        position_label = st.selectbox("Position", POSITIONS)
+        position_label = st.selectbox("Position", POSITIONS,
+                                       help="Long = bought, Short = sold. Long profits when option gains value, Short profits from time decay.")
     with col_ticker:
-        ticker = st.text_input("Underlying", value="SPY")
+        ticker = st.text_input("Underlying", value="SPY",
+                                help="Ticker symbol. Click Load from Yahoo to auto-fill market data.")
     with col_load:
         st.markdown("<br>", unsafe_allow_html=True)
         load_clicked = st.button("Load from Yahoo", use_container_width=True)
@@ -177,23 +179,28 @@ def main():
     mp1, mp2, mp3, mp4, mp5 = st.columns(5)
     with mp1:
         S = st.number_input("Spot", value=st.session_state.get("ex_spot", 688.0),
-                            min_value=1.0, step=1.0, format="%.2f")
+                            min_value=1.0, step=1.0, format="%.2f",
+                            help="Current price of the underlying.")
     with mp2:
         dte = st.number_input("DTE", value=int(st.session_state.get("ex_dte", 30)),
-                              min_value=1, max_value=730, step=1)
+                              min_value=1, max_value=730, step=1,
+                              help="Days to expiration.")
     with mp3:
         iv_pct = st.number_input("IV (%)",
                                  value=float(st.session_state.get("ex_iv", 15.0)),
                                  min_value=0.1, max_value=200.0, step=0.5,
-                                 format="%.1f")
+                                 format="%.1f",
+                                 help="Implied volatility (annualized). Determines option price and Greeks.")
     with mp4:
         r_pct = st.number_input("Rate (%)",
                                 value=float(st.session_state.get("ex_r", 4.0)),
-                                min_value=0.0, max_value=20.0, step=0.1)
+                                min_value=0.0, max_value=20.0, step=0.1,
+                                help="Annual risk-free rate (Treasury yield).")
     with mp5:
         q_pct = st.number_input("Div Yield (%)",
                                 value=float(st.session_state.get("ex_q", 1.0)),
-                                min_value=0.0, max_value=20.0, step=0.1)
+                                min_value=0.0, max_value=20.0, step=0.1,
+                                help="Annualized dividend yield. Reduces call prices, increases put prices.")
 
     r = r_pct / 100.0
     q = q_pct / 100.0
@@ -212,7 +219,8 @@ def main():
 
     with fc1:
         find_by = st.selectbox("Find by", ["Strike", "Delta", "Price",
-                                            "Theta (daily)", "Vega (per 1%)"])
+                                            "Theta (daily)", "Vega (per 1%)"],
+                               help="Choose how to find your option: directly by strike, or by solving for a target Greek.")
     with fc2:
         if find_by == "Strike":
             target_val = st.number_input("Strike", value=float(round(S)),

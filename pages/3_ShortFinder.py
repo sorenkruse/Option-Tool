@@ -138,13 +138,16 @@ def main():
     # ---- Inputs ----
     c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX").upper()
+        symbol = st.text_input("Symbol", value="^SPX",
+                                help="Underlying symbol. Use ^SPX for S&P 500 index options.").upper()
     with c2:
-        dte_input = st.number_input("DTE", value=40, min_value=1, max_value=365)
+        dte_input = st.number_input("DTE", value=40, min_value=1, max_value=365,
+                                     help="Target days to expiration. Nearest available expiration will be used.")
     with c3:
         target_delta = st.number_input("Target |Delta|", value=0.15,
                                        min_value=0.01, max_value=0.50,
-                                       step=0.01, format="%.2f")
+                                       step=0.01, format="%.2f",
+                                       help="Absolute delta for strike selection. Lower = further OTM = safer but less premium. Typical: 0.10-0.20.")
     with c4:
         st.markdown("<br>", unsafe_allow_html=True)
         run = st.button("Find Strikes", type="primary", use_container_width=True)
