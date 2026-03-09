@@ -154,7 +154,7 @@ def main():
         position_label = st.selectbox("Position", POSITIONS,
                                        help="Long = bought, Short = sold. Long profits when option gains value, Short profits from time decay.")
     with col_ticker:
-        ticker = st.text_input("Underlying", value="SPY",
+        ticker = st.text_input("Underlying", value="^SPX",
                                 help="Ticker symbol. Click Load from Yahoo to auto-fill market data.")
     with col_load:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -178,7 +178,7 @@ def main():
     # Market params
     mp1, mp2, mp3, mp4, mp5 = st.columns(5)
     with mp1:
-        S = st.number_input("Spot", value=st.session_state.get("ex_spot", 688.0),
+        S = st.number_input("Spot", value=st.session_state.get("ex_spot", 6800.0),
                             min_value=1.0, step=1.0, format="%.2f",
                             help="Current price of the underlying.")
     with mp2:

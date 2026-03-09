@@ -210,14 +210,13 @@ def main():
     # --- Sidebar ---
     with st.sidebar:
         st.markdown("**Parameters**")
-        ticker = st.text_input("Ticker", value="SPY",
+        ticker = st.text_input("Ticker", value="^SPX",
                                help="e.g. SPY, ^SPX, AAPL, MSFT")
-        strike = st.number_input("Strike", value=580.0, min_value=0.01, step=5.0,
+        strike = st.number_input("Strike", value=6800.0, min_value=0.01, step=5.0,
                                   help="Target strike price. Nearest available strike from the chain will be used.")
         dte = st.number_input("DTE", value=30, min_value=1, max_value=1095, step=1,
                                help="Days to expiration. The closest available expiration will be selected.")
 
-        st.divider()
         rate_mode = st.radio("Risk-Free Rate", ["Auto", "Manual"], horizontal=True,
                               help="Auto fetches Treasury yields matched to DTE. Manual lets you override.")
         manual_rate = None
@@ -226,20 +225,23 @@ def main():
                                           max_value=20.0, step=0.1,
                                           help="Annual risk-free rate for BS pricing.") / 100.0
 
-        st.divider()
         run = st.button("Calculate", type="primary", use_container_width=True)
 
     # --- Main ---
-    if not run:
+    if run:
+        with st.spinner("Fetching data..."):
+            try:
+                data = fetch_all_data(ticker, strike, dte)
+                st.session_state["pricing_data"] = data
+            except Exception as e:
+                st.error(f"Error: {e}")
+                return
+
+    if "pricing_data" not in st.session_state:
         st.info("Enter parameters and click Calculate.")
         return
 
-    with st.spinner("Fetching data..."):
-        try:
-            data = fetch_all_data(ticker, strike, dte)
-        except Exception as e:
-            st.error(f"Error: {e}")
-            return
+    data = st.session_state["pricing_data"]
 
     # Risk-free rate
     r = manual_rate if manual_rate is not None else data["risk_free_rate"]
@@ -338,6 +340,120 @@ def main():
         st.caption("Insufficient data for parity check.")
 
     st.divider()
+
+    # --- Greeks over Time ---
+    st.divider()
+    st.markdown("### Greeks over Time")
+    st.caption("How Greeks evolve as DTE decreases, with Spot and IV held constant.")
+
+    available_greeks = {
+        "Delta": "delta",
+        "Gamma": "gamma",
+        "Theta/day": "theta_daily",
+        "Vega/1%": "vega_pct",
+        "Charm": "charm",
+        "Vanna": "vanna",
+    }
+
+    gc1, gc2 = st.columns([3, 1])
+    with gc1:
+        selected_greeks = st.multiselect(
+            "Select Greeks",
+            list(available_greeks.keys()),
+            default=["Delta", "Theta/day"],
+            help="Choose one or more Greeks to plot. Each gets its own Y-axis scale."
+        )
+    with gc2:
+        greeks_opt_type = st.radio("Type", ["Call", "Put"], horizontal=True,
+                                    key="greeks_time_type")
+
+    if selected_greeks:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        dte_actual = data["actual_dte"]
+        dte_range = list(range(max(dte_actual, 2), 0, -1))
+
+        # Use implied spot + derived IV (Method A) for the selected type
+        gt_opt = greeks_opt_type.lower()
+        gt_strike = data[f"actual_{gt_opt}_strike"]
+        gt_mkt = data[f"{gt_opt}_market"]
+        gt_mid = gt_mkt["mid"]
+        if gt_mid > 0 and not np.isnan(gt_mid):
+            gt_iv = bs.implied_volatility(gt_mid, implied_spot, gt_strike, T, r, q, gt_opt)
+            if np.isnan(gt_iv) or gt_iv < 0.01 or gt_iv > 2.0:
+                gt_iv = data["atm_iv"].get("avg_iv", 0.20)
+        else:
+            gt_iv = data["atm_iv"].get("avg_iv", 0.20)
+
+        # Compute Greeks for each DTE
+        greek_series = {name: [] for name in selected_greeks}
+        valid_dtes = []
+
+        for d in dte_range:
+            t_d = d / 365.0
+            try:
+                res_d = bs.calculate_all(implied_spot, gt_strike, t_d, r, gt_iv, q, gt_opt)
+                valid_dtes.append(d)
+                for name in selected_greeks:
+                    greek_series[name].append(res_d[available_greeks[name]])
+            except Exception:
+                continue
+
+        if valid_dtes:
+            # Colors for up to 6 traces
+            colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
+
+            if len(selected_greeks) <= 2:
+                # Dual Y-axis for 1-2 Greeks
+                fig_g = make_subplots(specs=[[{"secondary_y": len(selected_greeks) > 1}]])
+
+                for i, name in enumerate(selected_greeks):
+                    secondary = i > 0
+                    fig_g.add_trace(
+                        go.Scatter(
+                            x=valid_dtes, y=greek_series[name],
+                            mode="lines", name=name,
+                            line=dict(color=colors[i], width=2),
+                        ),
+                        secondary_y=secondary,
+                    )
+                    fig_g.update_yaxes(
+                        title_text=name, secondary_y=secondary,
+                        title_font=dict(color=colors[i]),
+                        tickfont=dict(color=colors[i]),
+                    )
+            else:
+                # 3+ Greeks: single Y-axis, normalized display
+                fig_g = go.Figure()
+                for i, name in enumerate(selected_greeks):
+                    fig_g.add_trace(
+                        go.Scatter(
+                            x=valid_dtes, y=greek_series[name],
+                            mode="lines", name=name,
+                            line=dict(color=colors[i % len(colors)], width=2),
+                        )
+                    )
+
+            fig_g.update_layout(
+                template="plotly_white", height=380,
+                xaxis_title="DTE",
+                xaxis=dict(autorange="reversed"),
+                margin=dict(l=50, r=50, t=30, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                hovermode="x unified",
+            )
+            fig_g.add_vline(x=dte_actual, line_dash="dash", line_color="gray",
+                            annotation_text=f"Current ({dte_actual}d)")
+
+            st.plotly_chart(fig_g, use_container_width=True)
+
+            st.caption(
+                f"{greeks_opt_type} {gt_strike:,.0f} | "
+                f"Spot: {implied_spot:,.2f} | IV: {gt_iv*100:.1f}% | "
+                f"r: {r*100:.2f}% | q: {q*100:.2f}%"
+            )
+
 
     # --- IV Smile Charts ---
     st.markdown("### IV Smile")

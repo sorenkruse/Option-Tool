@@ -43,5 +43,6 @@ pg = st.navigation([
     st.Page(str(pages_dir / "2_Explorer.py"), title="Explorer"),
     st.Page(str(pages_dir / "3_ShortFinder.py"), title="Short Finder"),
     st.Page(str(pages_dir / "4_Optimizer.py"), title="Optimizer"),
+    st.Page(str(pages_dir / "5_HoldOrRoll.py"), title="Hold or Roll"),
 ])
 pg.run()
