@@ -298,22 +298,36 @@ def _compute(symbol, short_dte, long_dte, strike_step,
     vix = get_vix()
     iv_atm = vix / 100.0 if not np.isnan(vix) else 0.20
 
-    # Get all available expirations
-    expirations, chain_ticker = get_available_expirations(symbol)
     import datetime
     today = pd.Timestamp.now().normalize().date()
 
-    exp_dtes = []
-    for exp_str in expirations:
-        exp_date = datetime.date.fromisoformat(exp_str)
-        dte = (exp_date - today).days
-        if 5 <= dte <= 60:
-            exp_dtes.append((dte, exp_str))
-
-    if not exp_dtes:
-        raise ValueError("No suitable expirations found.")
-
     if auto_mode:
+        # Get all available expirations
+        try:
+            expirations, chain_ticker = get_available_expirations(symbol)
+        except Exception as e:
+            raise ValueError(f"Could not fetch expirations: {e}")
+
+        if not expirations:
+            raise ValueError(f"No expirations available for {symbol}. "
+                             "Try Manual DTEs mode or check the symbol.")
+
+        exp_dtes = []
+        for exp_str in expirations:
+            try:
+                exp_date = datetime.date.fromisoformat(exp_str)
+                dte = (exp_date - today).days
+                if 5 <= dte <= 60:
+                    exp_dtes.append((dte, exp_str))
+            except Exception:
+                continue
+
+        if not exp_dtes:
+            raise ValueError(
+                f"No expirations between 5-60 DTE found for {symbol}. "
+                f"Available: {len(expirations)} total. "
+                "Try Manual DTEs mode."
+            )
         # Scan all valid short/long DTE combinations
         best_result = None
         best_score = -9999
