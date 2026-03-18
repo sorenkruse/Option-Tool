@@ -466,22 +466,31 @@ def _display(res):
     st.dataframe(df.style.apply(highlight, axis=1),
                   use_container_width=True, hide_index=True)
 
-    # ---- OptionStrat links ----
+    # ---- OptionStrat links + IBKR CSV ----
     link_cols = st.columns(min(len(trades), 5))
     for i, t in enumerate(trades):
         with link_cols[i]:
-            os_legs = []
+            trade_legs = []
             for leg in t["legs"]:
-                for _ in range(leg["qty"]):
-                    os_legs.append({
-                        "strike": leg["strike"],
-                        "option_type": leg["type"],
-                        "expiration": t["expiration"],
-                        "long": leg["long"],
-                    })
-            url = bs.optionstrat_url(res["symbol"], os_legs)
+                trade_legs.append({
+                    "strike": leg["strike"],
+                    "option_type": leg["type"],
+                    "expiration": t["expiration"],
+                    "long": leg["long"],
+                    "qty": leg["qty"],
+                })
+            url = bs.optionstrat_url(res["symbol"], trade_legs)
             if url:
                 st.caption(f"[#{i+1} OptionStrat]({url})")
+            csv_data = bs.ibkr_basket_csv(res["symbol"], trade_legs,
+                                           tag=f"Trade{i+1}")
+            st.download_button(
+                f"#{i+1} IBKR CSV",
+                csv_data,
+                f"trade_{i+1}_{res['symbol']}.csv",
+                "text/csv",
+                key=f"ibkr_dl_{i}",
+            )
 
     # ---- Recommendation ----
     st.markdown("---")

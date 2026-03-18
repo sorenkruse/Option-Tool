@@ -500,38 +500,34 @@ def optionstrat_url(symbol: str, legs: list) -> str | None:
             - option_type: "call" or "put" (or "C"/"P")
             - expiration: "YYYY-MM-DD" string
             - long: bool (True = bought, False = sold)
+            - qty: int (optional, default 1)
+
+    Quantity encoding:
+        qty=1 long:  .SPXW260327C6720
+        qty=1 short: -.SPXW260327P6640
+        qty=2 short: .SPXW260327C6745x-2
+        qty=3 long:  .SPXW260327C6745x3
 
     Returns:
         URL string or None if no legs.
-
-    Example:
-        legs = [
-            {"strike": 6810, "option_type": "put",  "expiration": "2026-03-19", "long": True},
-            {"strike": 6870, "option_type": "put",  "expiration": "2026-03-09", "long": False},
-            {"strike": 7000, "option_type": "call", "expiration": "2026-03-09", "long": True},
-        ]
-        url = optionstrat_url("SPX", legs)
-        # https://optionstrat.com/build/custom/SPX/
-        #   .SPXW260319P6810,-.SPXW260309P6870,.SPXW260309C7000
     """
     if not legs:
         return None
 
     sym = symbol.upper().replace("^", "")
     leg_sym = _OPTIONSTRAT_SYMBOLS.get(sym, sym)
-    # Also try with ^ prefix
     if leg_sym == sym:
         leg_sym = _OPTIONSTRAT_SYMBOLS.get(f"^{sym}", sym)
 
     parts = []
     for leg in legs:
         strike = int(float(leg["strike"]))
+        qty = leg.get("qty", 1)
+        is_long = leg.get("long", True)
 
-        # option type: normalise to C/P
         ot = leg.get("option_type", leg.get("type", "C"))
-        ot = ot[0].upper()  # "call" -> "C", "put" -> "P"
+        ot = ot[0].upper()
 
-        # expiration: YYYY-MM-DD -> YYMMDD
         exp = leg["expiration"]
         try:
             from datetime import datetime as _dt
@@ -540,7 +536,93 @@ def optionstrat_url(symbol: str, legs: list) -> str | None:
         except Exception:
             date_code = exp.replace("-", "")
 
-        prefix = "" if leg.get("long", True) else "-"
-        parts.append(f"{prefix}.{leg_sym}{date_code}{ot}{strike}")
+        base = f".{leg_sym}{date_code}{ot}{strike}"
+
+        if qty == 1:
+            prefix = "" if is_long else "-"
+            parts.append(f"{prefix}{base}")
+        else:
+            # qty > 1: use xN (long) or x-N (short) suffix
+            if is_long:
+                parts.append(f"{base}x{qty}")
+            else:
+                parts.append(f"{base}x-{qty}")
 
     return f"https://optionstrat.com/build/custom/{sym}/{','.join(parts)}"
+
+
+# ============================================================================
+# IBKR Basket Trader CSV Export
+# ============================================================================
+
+def ibkr_basket_csv(symbol: str, legs: list, order_type: str = "LMT",
+                     tag: str = "") -> str:
+    """
+    Generate a TWS Basket Trader CSV string for a multi-leg options trade.
+
+    Args:
+        symbol: Underlying symbol (e.g. "SPX", "^SPX", "SPY")
+        legs: List of dicts, each with:
+            - strike: float
+            - option_type: "call"/"put" (or "C"/"P")
+            - expiration: "YYYY-MM-DD" string
+            - long: bool (True = buy, False = sell)
+            - qty: int (default 1)
+            - price: float (optional, limit price per contract)
+        order_type: "LMT" or "MKT"
+        tag: Optional basket tag for grouping
+
+    Returns:
+        CSV string ready for download.
+    """
+    if not legs:
+        return ""
+
+    sym = symbol.upper().replace("^", "")
+
+    # SPX options trade on CBOE as SPXW
+    exchange = "SMART"
+    currency = "USD"
+    sec_type = "OPT"
+
+    header = ("Action,Quantity,Symbol,SecType,Exchange,Currency,"
+              "TimeInForce,OrderType,LmtPrice,"
+              "LastTradingDayOrContractMonth,Strike,Right")
+    if tag:
+        header += ",BasketTag"
+
+    rows = [header]
+
+    for leg in legs:
+        action = "BUY" if leg.get("long", True) else "SELL"
+        qty = leg.get("qty", 1)
+
+        strike = float(leg["strike"])
+
+        # option type
+        ot = leg.get("option_type", leg.get("type", "C"))
+        right = "CALL" if ot[0].upper() == "C" else "PUT"
+
+        # expiration: YYYY-MM-DD -> YYYYMMDD
+        exp = leg["expiration"]
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.strptime(exp, "%Y-%m-%d")
+            exp_fmt = dt.strftime("%Y%m%d")
+        except Exception:
+            exp_fmt = exp.replace("-", "")
+
+        # Limit price (0 for market orders)
+        price = leg.get("price", 0)
+        if order_type == "MKT":
+            price = 0
+
+        row = (f"{action},{qty},{sym},{sec_type},{exchange},{currency},"
+               f"DAY,{order_type},{price:.2f},"
+               f"{exp_fmt},{strike:.1f},{right}")
+        if tag:
+            row += f",{tag}"
+
+        rows.append(row)
+
+    return "\n".join(rows)

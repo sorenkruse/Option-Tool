@@ -46,5 +46,6 @@ pg = st.navigation([
     st.Page(str(pages_dir / "4_Optimizer.py"), title="Optimizer"),
     st.Page(str(pages_dir / "5_HoldOrRoll.py"), title="Hold or Roll"),
     st.Page(str(pages_dir / "7_TradeComparator.py"), title="Trade Comparator"),
+    st.Page(str(pages_dir / "8_Flyagonal.py"), title="Flyagonal"),
 ])
 pg.run()

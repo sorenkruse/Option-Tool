@@ -601,11 +601,11 @@ def _display(res):
         if cur_url:
             st.caption(f"[Current position]({cur_url})")
 
-    # Roll links
+    # Roll links + IBKR CSV
     for i, c in enumerate(top_rolls):
         if i + 1 < len(link_cols):
             with link_cols[i + 1]:
-                roll_url = bs.optionstrat_url(res["symbol"], [
+                roll_legs = [
                     # Close current
                     {"strike": res["cur_strike"],
                      "option_type": res["opt_type"],
@@ -616,9 +616,19 @@ def _display(res):
                      "option_type": res["opt_type"],
                      "expiration": c["expiration"],
                      "long": res["is_long"]},
-                ])
+                ]
+                roll_url = bs.optionstrat_url(res["symbol"], roll_legs)
                 if roll_url:
                     st.caption(f"[Roll #{i+1}]({roll_url})")
+                csv_data = bs.ibkr_basket_csv(res["symbol"], roll_legs,
+                                               tag=f"Roll{i+1}")
+                st.download_button(
+                    f"#{i+1} IBKR CSV",
+                    csv_data,
+                    f"roll_{i+1}_{res['symbol']}.csv",
+                    "text/csv",
+                    key=f"hor_ibkr_{i}",
+                )
 
     # ---- Recommendation ----
     st.markdown("---")
