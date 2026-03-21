@@ -240,6 +240,36 @@ def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
 
 # ── Display ──────────────────────────────────────────────────────────────
 
+# Column configs with tooltips
+PROG_COL_CFG = {
+    "Strike": st.column_config.TextColumn("Strike", help="Option strike price (OTM only)"),
+    "DTE": st.column_config.NumberColumn("DTE", help="Days to expiration"),
+    "Entry": st.column_config.TextColumn("Entry", help="Option premium at current market (×100 per contract)"),
+    "Full": st.column_config.TextColumn("Full", help="P&L if full forecast move happens"),
+    "Half": st.column_config.TextColumn("Half", help="P&L if only 50% of the move happens"),
+    "Flat": st.column_config.TextColumn("Flat", help="P&L if spot stays unchanged (theta + slight IV decay)"),
+    "Weighted": st.column_config.TextColumn("Weighted", help="Conviction-weighted avg of Full/Half/Flat"),
+    "W%": st.column_config.TextColumn("W%", help="Weighted P&L as % of entry premium"),
+    "PoP": st.column_config.TextColumn("PoP", help="Probability of Profit at expiry (break-even adjusted)"),
+    "EV": st.column_config.TextColumn("EV", help="Expected Value = Weighted × PoP (risk-adjusted score)"),
+    "Delta": st.column_config.TextColumn("Delta", help="Option delta at entry"),
+    "IV": st.column_config.TextColumn("IV", help="Implied volatility from smile curve at entry"),
+}
+
+PROG_TOP_CFG = {
+    "Leg": st.column_config.TextColumn("Leg", help="Position type: LC/LP/SC/SP or underlying futures"),
+    "Strike": st.column_config.TextColumn("Strike", help="Strike price or spot for underlying"),
+    "DTE": st.column_config.NumberColumn("DTE", help="Days to expiration"),
+    "Entry": st.column_config.TextColumn("Entry", help="Cost to enter (premium ×100 or margin for futures)"),
+    "Full": st.column_config.TextColumn("Full", help="P&L at full forecast move"),
+    "Half": st.column_config.TextColumn("Half", help="P&L at half move"),
+    "Flat": st.column_config.TextColumn("Flat", help="P&L if spot unchanged"),
+    "Weighted": st.column_config.TextColumn("Weighted", help="Conviction-weighted P&L"),
+    "PoP": st.column_config.TextColumn("PoP", help="Probability of Profit"),
+    "EV": st.column_config.TextColumn("EV", help="Expected Value = Weighted × PoP"),
+}
+
+
 def _fmt_table(df_subset):
     """Format a dataframe for display. P&L values multiplied by 100 (contract size)."""
     d = df_subset[["strike", "dte", "entry", "pnl", "pnl_half",
@@ -370,7 +400,7 @@ def display(res):
                 "EV": f"${row['ev']*100:+,.0f}",
             })
     if top_picks:
-        st.dataframe(pd.DataFrame(top_picks), use_container_width=True,
+        st.dataframe(pd.DataFrame(top_picks), use_container_width=True, column_config=PROG_TOP_CFG,
                       hide_index=True)
 
     # Combined + per-leg OptionStrat links (options only, skip underlying)
@@ -464,7 +494,7 @@ def display(res):
         if sub.empty:
             continue
         st.markdown(f"### {label}")
-        st.dataframe(_fmt_table(sub), use_container_width=True, hide_index=True)
+        st.dataframe(_fmt_table(sub), use_container_width=True, hide_index=True, column_config=PROG_COL_CFG)
 
     # ── HeatMap ──
     st.markdown("### HeatMap")
