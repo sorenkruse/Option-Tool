@@ -97,17 +97,30 @@ def calc_pop(spot, strike, T, r, iv, q, opt_type, is_long, premium):
 
 def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
                  forecast_dte, strike_step, expirations_data,
-                 scan_dtes):
+                 scan_dtes, conviction=0.5):
     """
     Scan all single-leg options across strikes and DTEs.
 
-    Returns list of dicts with P&L, PoP, Score for each option.
+    conviction: 0.0-1.0, determines scenario weights:
+        Full move weight  = 0.15 + 0.45 * conviction
+        Half move weight  = 0.25 + 0.10 * conviction
+        Flat weight       = 0.60 - 0.55 * conviction
     """
     results = []
 
-    # Strike range: ±15% from spot, rounded
-    strike_low = _round(spot * 0.85, strike_step)
-    strike_high = _round(spot * 1.15, strike_step)
+    # Scenario weights from conviction
+    w_full = 0.15 + 0.45 * conviction
+    w_half = 0.25 + 0.10 * conviction
+    w_flat = 1.0 - w_full - w_half
+
+    # Scenario spots and IVs
+    half_spot = spot + (target_spot - spot) * 0.5
+    half_iv = project_iv(iv_atm, spot, half_spot)
+    flat_iv = max(iv_atm - 0.005, 0.05)  # slight IV decay when flat
+
+    # Strike range: ±8% from spot (tradeable range)
+    strike_low = _round(spot * 0.92, strike_step)
+    strike_high = _round(spot * 1.08, strike_step)
     strikes = np.arange(strike_low, strike_high + strike_step, strike_step)
 
     for exp_str, chain_data in expirations_data.items():
@@ -125,6 +138,12 @@ def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
 
         for strike in strikes:
             for opt_type in ["call", "put"]:
+                # OTM only: calls above spot, puts below spot
+                if opt_type == "call" and strike <= spot:
+                    continue
+                if opt_type == "put" and strike >= spot:
+                    continue
+
                 smile = call_smile if opt_type == "call" else put_smile
                 iv_entry = _iv(smile, strike, iv_atm)
 
@@ -138,45 +157,62 @@ def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
                 if price < 0.10:
                     continue
 
-                # Exit price at forecast target
-                # IV at exit: project from target spot, adjusted for strike
-                iv_exit_atm = target_iv
-                # Skew adjustment: OTM puts get more IV in drops
-                if opt_type == "put" and target_spot < spot:
-                    moneyness = strike / target_spot
-                    iv_exit = iv_exit_atm * (1 + 0.15 * max(0, moneyness - 1))
-                elif opt_type == "call" and target_spot > spot:
-                    moneyness = target_spot / strike
-                    iv_exit = iv_exit_atm * (1 - 0.05 * max(0, moneyness - 1))
-                else:
-                    iv_exit = iv_exit_atm
-
-                iv_exit = max(iv_exit, 0.05)
-
-                try:
-                    exit_res = bs.calculate_all(target_spot, strike, T_exit, r, iv_exit, q, opt_type)
-                except Exception:
+                if abs(entry["delta"]) > 0.85:
                     continue
 
-                exit_price = exit_res["price"]
+                # Compute exit price for 3 scenarios
+                # Key: exit IV = entry smile IV + projected IV CHANGE (not raw ATM IV)
+                iv_change_full = target_iv - iv_atm
+                iv_change_half = half_iv - iv_atm
+                iv_change_flat = flat_iv - iv_atm
+
+                def _exit_price(s_target, iv_shift):
+                    iv_e = iv_entry + iv_shift  # smile IV + change
+                    # Skew adjustment for large moves
+                    if opt_type == "put" and s_target < spot:
+                        m = strike / s_target
+                        iv_e *= (1 + 0.15 * max(0, m - 1))
+                    elif opt_type == "call" and s_target > spot:
+                        m = s_target / strike
+                        iv_e *= (1 - 0.05 * max(0, m - 1))
+                    iv_e = max(iv_e, 0.05)
+                    try:
+                        return bs.calculate_all(s_target, strike, T_exit, r, iv_e, q, opt_type)["price"]
+                    except Exception:
+                        return None
+
+                exit_full = _exit_price(target_spot, iv_change_full)
+                exit_half = _exit_price(half_spot, iv_change_half)
+                exit_flat = _exit_price(spot, iv_change_flat)
+
+                if exit_full is None or exit_half is None or exit_flat is None:
+                    continue
 
                 for is_long in [True, False]:
-                    if is_long:
-                        pnl = exit_price - price
-                        label = f"L{'C' if opt_type == 'call' else 'P'}"
-                    else:
-                        pnl = price - exit_price
-                        label = f"S{'C' if opt_type == 'call' else 'P'}"
+                    # Short positions: enforce 2% minimum distance from spot
+                    if not is_long:
+                        if opt_type == "call" and strike < spot * 1.02:
+                            continue
+                        if opt_type == "put" and strike > spot * 0.98:
+                            continue
+
+                    sign = 1 if is_long else -1
+                    pnl_full = sign * (exit_full - price)
+                    pnl_half = sign * (exit_half - price)
+                    pnl_flat = sign * (exit_flat - price)
+
+                    # Weighted P&L
+                    pnl_weighted = w_full * pnl_full + w_half * pnl_half + w_flat * pnl_flat
+
+                    label = ("L" if is_long else "S") + ("C" if opt_type == "call" else "P")
 
                     pop = calc_pop(spot, strike, T_entry, r, iv_entry, q,
                                    opt_type, is_long, price)
 
-                    # Score: expected value = P&L × PoP
-                    ev = pnl * pop
+                    ev = pnl_weighted * pop
 
-                    # ROC
                     capital = price if is_long else max(abs(entry["delta"]) * spot * 0.1, price)
-                    roc = pnl / capital if capital > 0 else 0
+                    roc = pnl_weighted / capital if capital > 0 else 0
 
                     results.append({
                         "leg": label,
@@ -186,15 +222,17 @@ def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
                         "opt_type": opt_type,
                         "is_long": is_long,
                         "entry": price,
-                        "exit": exit_price,
-                        "pnl": pnl,
-                        "pnl_pct": pnl / price * 100 if price > 0 else 0,
+                        "exit": exit_full,
+                        "pnl": pnl_full,
+                        "pnl_half": pnl_half,
+                        "pnl_flat": pnl_flat,
+                        "pnl_w": pnl_weighted,
+                        "pnl_pct": pnl_weighted / price * 100 if price > 0 else 0,
                         "pop": pop,
                         "ev": ev,
                         "roc": roc,
                         "delta": entry["delta"],
                         "iv_entry": iv_entry,
-                        "iv_exit": iv_exit,
                     })
 
     return results
@@ -203,20 +241,23 @@ def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
 # ── Display ──────────────────────────────────────────────────────────────
 
 def _fmt_table(df_subset):
-    """Format a dataframe for display."""
-    d = df_subset[["strike", "dte", "entry", "exit", "pnl", "pnl_pct",
+    """Format a dataframe for display. P&L values multiplied by 100 (contract size)."""
+    d = df_subset[["strike", "dte", "entry", "pnl", "pnl_half",
+                    "pnl_flat", "pnl_w", "pnl_pct",
                     "pop", "ev", "delta", "iv_entry"]].copy()
-    d.columns = ["Strike", "DTE", "Entry", "Exit", "P&L", "P&L%",
-                  "PoP", "EV", "Delta", "IV"]
-    d["Strike"] = d["Strike"].map(lambda x: f"{x:,.0f}")
-    d["Entry"]  = d["Entry"].map(lambda x: f"${x:.2f}")
-    d["Exit"]   = d["Exit"].map(lambda x: f"${x:.2f}")
-    d["P&L"]    = d["P&L"].map(lambda x: f"${x:+.2f}")
-    d["P&L%"]   = d["P&L%"].map(lambda x: f"{x:+.0f}%")
-    d["PoP"]    = d["PoP"].map(lambda x: f"{x*100:.0f}%")
-    d["EV"]     = d["EV"].map(lambda x: f"${x:+.2f}")
-    d["Delta"]  = d["Delta"].map(lambda x: f"{x:.3f}")
-    d["IV"]     = d["IV"].map(lambda x: f"{x*100:.1f}%")
+    d.columns = ["Strike", "DTE", "Entry", "Full", "Half", "Flat",
+                  "Weighted", "W%", "PoP", "EV", "Delta", "IV"]
+    d["Strike"]   = d["Strike"].map(lambda x: f"{x:,.0f}")
+    d["Entry"]    = d["Entry"].map(lambda x: f"${x*100:,.0f}")
+    d["Full"]     = d["Full"].map(lambda x: f"${x*100:+,.0f}")
+    d["Half"]     = d["Half"].map(lambda x: f"${x*100:+,.0f}")
+    d["Flat"]     = d["Flat"].map(lambda x: f"${x*100:+,.0f}")
+    d["Weighted"] = d["Weighted"].map(lambda x: f"${x*100:+,.0f}")
+    d["W%"]       = d["W%"].map(lambda x: f"{x:+.0f}%")
+    d["PoP"]      = d["PoP"].map(lambda x: f"{x*100:.0f}%")
+    d["EV"]       = d["EV"].map(lambda x: f"${x*100:+,.0f}")
+    d["Delta"]    = d["Delta"].map(lambda x: f"{x:.3f}")
+    d["IV"]       = d["IV"].map(lambda x: f"{x*100:.1f}%")
     return d
 
 
@@ -227,21 +268,84 @@ def display(res):
 
     st.markdown("---")
     st.markdown(f"### {res['symbol']} @ {spot:,.2f}  |  VIX {res['vix']:.1f}")
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Target", f"{target:,.0f}", f"{move_pct:+.1f}%")
     m2.metric("IV Now", f"{res['iv_now']*100:.1f}%")
     m3.metric("IV Projected", f"{res['iv_target']*100:.1f}%",
               f"{(res['iv_target']-res['iv_now'])*100:+.1f}%")
-    m4.metric("Options Scanned", f"{len(res['all_results']):,}")
+    conv = res.get("conviction", 0.5)
+    w_full = 0.15 + 0.45 * conv
+    w_half = 0.25 + 0.10 * conv
+    w_flat = 1.0 - w_full - w_half
+    m4.metric("Conviction", f"{conv*100:.0f}%")
+    m5.metric("Weights", f"{w_full:.0%}/{w_half:.0%}/{w_flat:.0%}",
+              help="Full / Half / Flat scenario weights")
 
     df = pd.DataFrame(res["all_results"])
     if df.empty:
         st.warning("No options found.")
         return
 
-    # ── Top 4 per type (summary) ──
+    # ── Top picks per type + underlying benchmark ──
     st.markdown("### Best Picks (Top 1 per Type)")
+
+    # Underlying benchmark
+    spot = res["spot"]
+    target = res["target_spot"]
+    move_pct = res["move_pct"]
+
+    # Determine futures proxy
+    sym_upper = res["symbol"].upper().replace("^", "")
+    is_bearish = move_pct < 0
+
     top_picks = []
+
+    # Underlying row first - direction follows forecast
+    is_bearish = move_pct < 0
+    if sym_upper in ("SPX", "GSPC"):
+        fut_label = "10 MES Short" if is_bearish else "10 MES Long"
+        fut_multiplier = 5.0
+        fut_qty = 10
+        fut_margin = 1_500
+    elif sym_upper == "SPY":
+        fut_label = "100 Shares Short" if is_bearish else "100 Shares Long"
+        fut_multiplier = 1.0
+        fut_qty = 100
+        fut_margin = spot * 100 * 0.5
+    elif sym_upper in ("NDX", "QQQ"):
+        fut_label = "10 MNQ Short" if is_bearish else "10 MNQ Long"
+        fut_multiplier = 2.0
+        fut_qty = 10
+        fut_margin = 2_000
+    else:
+        fut_label = "100 Shares Short" if is_bearish else "100 Shares Long"
+        fut_multiplier = 1.0
+        fut_qty = 100
+        fut_margin = spot * 100 * 0.5
+
+    fut_pnl_per_pt = fut_multiplier * fut_qty
+    # Short futures profit from drops, long from rallies
+    if is_bearish:
+        fut_pnl = (spot - target) * fut_pnl_per_pt  # short: profit when spot drops
+    else:
+        fut_pnl = (target - spot) * fut_pnl_per_pt
+    fut_capital = fut_margin * fut_qty if fut_multiplier > 1 else fut_margin
+    fut_roc = fut_pnl / fut_capital * 100 if fut_capital > 0 else 0
+
+    top_picks.append({
+        "Leg": fut_label,
+        "Strike": f"{spot:,.0f}",
+        "DTE": res["forecast_dte"],
+        "Entry": f"${fut_capital:,.0f}",
+        "Full": f"${fut_pnl:+,.0f}",
+        "Half": f"${fut_pnl/2:+,.0f}",
+        "Flat": "$0",
+        "Weighted": f"${fut_pnl * (w_full + w_half*0.5):+,.0f}",
+        "PoP": "n/a",
+        "EV": "n/a",
+    })
+
+    # Options rows (P&L multiplied by 100 for real contract value)
     for leg in ["LC", "LP", "SC", "SP"]:
         sub = df[df["leg"] == leg].sort_values("ev", ascending=False)
         if not sub.empty:
@@ -250,33 +354,65 @@ def display(res):
                 "Leg": leg,
                 "Strike": f"{row['strike']:,.0f}",
                 "DTE": row["dte"],
-                "Entry": f"${row['entry']:.2f}",
-                "P&L": f"${row['pnl']:+.2f}",
-                "P&L%": f"{row['pnl_pct']:+.0f}%",
+                "Entry": f"${row['entry']*100:,.0f}",
+                "Full": f"${row['pnl']*100:+,.0f}",
+                "Half": f"${row['pnl_half']*100:+,.0f}",
+                "Flat": f"${row['pnl_flat']*100:+,.0f}",
+                "Weighted": f"${row['pnl_w']*100:+,.0f}",
                 "PoP": f"{row['pop']*100:.0f}%",
-                "EV": f"${row['ev']:+.2f}",
-                "Delta": f"{row['delta']:.3f}",
+                "EV": f"${row['ev']*100:+,.0f}",
             })
     if top_picks:
         st.dataframe(pd.DataFrame(top_picks), use_container_width=True,
                       hide_index=True)
 
-    # OptionStrat + IBKR for all top picks
+    # Combined + per-leg OptionStrat links (options only, skip underlying)
+    option_legs = ["LC", "LP", "SC", "SP"]
     if top_picks:
-        cols = st.columns(len(top_picks))
-        for i, pick_row in enumerate(top_picks):
+        all_legs = []
+        per_leg_data = []
+        for pick_row in top_picks:
             leg_type = pick_row["Leg"]
+            if leg_type not in option_legs:
+                continue
             sub = df[df["leg"] == leg_type].sort_values("ev", ascending=False)
             if sub.empty:
                 continue
             top = sub.iloc[0]
-            os_legs = [{"strike": top["strike"], "option_type": top["opt_type"],
-                         "expiration": top["exp"], "long": top["is_long"], "qty": 1}]
+            leg_dict = {
+                "strike": int(float(top["strike"])),
+                "option_type": str(top["opt_type"]),
+                "expiration": str(top["exp"]),
+                "long": bool(top["is_long"]),
+                "qty": 1,
+                "price": float(top["entry"]),
+            }
+            all_legs.append(leg_dict)
+            per_leg_data.append((leg_type, leg_dict))
+
+        # Combined link (shorts first, puts before calls - OptionStrat convention)
+        all_legs_sorted = sorted(all_legs,
+                                  key=lambda l: (l["long"], l["option_type"] != "put"))
+        url_all = bs.optionstrat_url(res["symbol"], all_legs_sorted)
+        csv_all = bs.ibkr_basket_csv(res["symbol"], all_legs_sorted, tag="Prognose")
+        clean_sym = res["symbol"].replace("^", "")
+        e1, e2 = st.columns(2)
+        with e1:
+            if url_all:
+                st.markdown(f"[All Picks: OptionStrat]({url_all})")
+        with e2:
+            st.download_button("All Picks: IBKR CSV", csv_all,
+                                f"prognose_all_{clean_sym}.csv",
+                                "text/csv", key="csv_all")
+
+        # Per-leg links
+        cols = st.columns(len(per_leg_data))
+        for i, (leg_type, leg_dict) in enumerate(per_leg_data):
             with cols[i]:
-                url = bs.optionstrat_url(res["symbol"], os_legs)
+                url = bs.optionstrat_url(res["symbol"], [leg_dict])
                 if url:
-                    st.markdown(f"[{leg_type} OptionStrat]({url})")
-                csv = bs.ibkr_basket_csv(res["symbol"], os_legs, tag=leg_type)
+                    st.markdown(f"[{leg_type}]({url})")
+                csv = bs.ibkr_basket_csv(res["symbol"], [leg_dict], tag=leg_type)
                 st.download_button(f"{leg_type} CSV", csv,
                                     f"prognose_{leg_type}_{res['symbol']}.csv",
                                     "text/csv", key=f"csv_{leg_type}")
@@ -312,7 +448,7 @@ def display(res):
         st.info(f"No data for {hm_leg}.")
         return
 
-    color_col = "pnl" if hm_color == "P&L" else "ev"
+    color_col = "pnl_w" if hm_color == "P&L" else "ev"
     pivot = hm_data.pivot_table(index="strike", columns="dte",
                                  values=color_col, aggfunc="first")
     pivot = pivot.sort_index(ascending=False)
@@ -353,7 +489,8 @@ def display(res):
 
 # ── Compute ──────────────────────────────────────────────────────────────
 
-def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets):
+def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
+            conviction=0.5):
     spot, _ = resolve_spot_price(symbol)
     q = get_dividend_yield(symbol)
     r = get_risk_free_rate(forecast_dte)
@@ -404,13 +541,14 @@ def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets):
 
     results = scan_options(spot, r, q, iv_now, target_spot, iv_target,
                            forecast_dte, strike_step, expirations_data,
-                           scan_dtes)
+                           scan_dtes, conviction)
 
     return {
         "symbol": symbol, "spot": spot, "vix": vix,
         "iv_now": iv_now, "iv_target": iv_target,
         "target_spot": target_spot, "move_pct": move_pct,
         "forecast_dte": forecast_dte,
+        "conviction": conviction,
         "all_results": results,
     }
 
@@ -423,7 +561,7 @@ def main():
     st.caption("Forecast-driven options scanner. "
                "Enter your directional view and find the best option to express it.")
 
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
         symbol = st.text_input("Symbol", value="^SPX").upper()
     with c2:
@@ -435,6 +573,12 @@ def main():
             min_value=1, max_value=30, step=1,
             help="Days until expected move completes.")
     with c4:
+        conviction = st.number_input("Conviction %", value=50,
+            min_value=10, max_value=90, step=10,
+            help="How confident in the forecast. "
+                 "Low = flat scenario dominates (favors shorts). "
+                 "High = full move dominates (favors longs).")
+    with c5:
         default_step = 25 if "SPX" in symbol else 5
         strike_step = st.number_input("Strike Step", value=default_step,
             min_value=1, max_value=50)
@@ -448,7 +592,8 @@ def main():
         with st.spinner("Scanning options..."):
             try:
                 result = compute(symbol, move_pct, forecast_dte,
-                                  strike_step, scan_targets)
+                                  strike_step, scan_targets,
+                                  conviction / 100.0)
                 st.session_state["prog_result"] = result
             except Exception as e:
                 st.error(f"Error: {e}")
