@@ -503,9 +503,12 @@ def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
     # Load chains for scan DTEs
     today = datetime.date.today()
     try:
-        exps, _ = get_available_expirations(symbol)
+        exps, chain_ticker = get_available_expirations(symbol)
     except Exception as e:
         raise ValueError(f"Could not fetch expirations: {e}")
+
+    if not exps:
+        raise ValueError(f"No expirations for {symbol}.")
 
     # Map expirations to DTEs
     exp_dte = {}
@@ -517,27 +520,32 @@ def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
         except Exception:
             continue
 
-    # Find closest expiration for each target DTE
+    if not exp_dte:
+        raise ValueError("No valid expirations found.")
+
+    # Find closest expiration for each target DTE, load chains
     scan_dtes = set()
     expirations_data = {}
+    errors = []
     for target_dte in scan_dte_targets:
-        best_exp = None
-        best_diff = 999
-        for e, d in exp_dte.items():
-            diff = abs(d - target_dte)
-            if diff < best_diff:
-                best_diff = diff
-                best_exp = e
-        if best_exp and best_exp not in expirations_data:
-            try:
-                ch, _, _ = resolve_options_chain(symbol, exp_dte[best_exp])
-                expirations_data[ch["expiration"]] = ch
-                scan_dtes.add(ch["dte_actual"])
-            except Exception:
-                continue
+        best_exp = min(exp_dte.keys(), key=lambda e: abs(exp_dte[e] - target_dte))
+        if best_exp in expirations_data:
+            continue
+        try:
+            ch, _, _ = resolve_options_chain(symbol, exp_dte[best_exp])
+            expirations_data[ch["expiration"]] = ch
+            scan_dtes.add(ch["dte_actual"])
+        except Exception as e:
+            errors.append(f"DTE {target_dte} ({best_exp}): {e}")
+            continue
 
     if not expirations_data:
-        raise ValueError("Could not load option chains.")
+        raise ValueError(
+            f"Could not load any option chains for {symbol}.\n"
+            f"Tried DTEs: {scan_dte_targets}\n"
+            f"Available expirations: {len(exp_dte)}\n"
+            f"Errors: {'; '.join(errors)}"
+        )
 
     results = scan_options(spot, r, q, iv_now, target_spot, iv_target,
                            forecast_dte, strike_step, expirations_data,
