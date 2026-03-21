@@ -269,17 +269,24 @@ def display(res):
     st.markdown("---")
     st.markdown(f"### {res['symbol']} @ {spot:,.2f}  |  VIX {res['vix']:.1f}")
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Target", f"{target:,.0f}", f"{move_pct:+.1f}%")
-    m2.metric("IV Now", f"{res['iv_now']*100:.1f}%")
+    m1.metric("Target", f"{target:,.0f}", f"{move_pct:+.1f}%",
+              help="Projected spot price = current spot × (1 + move%)")
+    m2.metric("IV Now", f"{res['iv_now']*100:.1f}%",
+              help="Current implied volatility from VIX")
     m3.metric("IV Projected", f"{res['iv_target']*100:.1f}%",
-              f"{(res['iv_target']-res['iv_now'])*100:+.1f}%")
+              f"{(res['iv_target']-res['iv_now'])*100:+.1f}%",
+              help="Projected IV at target spot. Drops increase IV (~4pts/10%), "
+                   "rallies decrease IV (~2.5pts/10%). Asymmetric like real markets.")
     conv = res.get("conviction", 0.5)
     w_full = 0.15 + 0.45 * conv
     w_half = 0.25 + 0.10 * conv
     w_flat = 1.0 - w_full - w_half
-    m4.metric("Conviction", f"{conv*100:.0f}%")
+    m4.metric("Conviction", f"{conv*100:.0f}%",
+              help="Your confidence level. Determines how much weight "
+                   "the full-move scenario gets vs. flat (no move).")
     m5.metric("Weights", f"{w_full:.0%}/{w_half:.0%}/{w_flat:.0%}",
-              help="Full / Half / Flat scenario weights")
+              help="Scenario weights: Full Move / Half Move / Flat. "
+                   "These weight the 3 P&L scenarios into the Weighted P&L and EV.")
 
     df = pd.DataFrame(res["all_results"])
     if df.empty:
@@ -417,12 +424,37 @@ def display(res):
                                     f"prognose_{leg_type}_{res['symbol']}.csv",
                                     "text/csv", key=f"csv_{leg_type}")
 
-    # ── Sort control ──
+    # ── Sort control + column legend ──
+    with st.expander("Column Legend"):
+        st.markdown(
+            "- **Strike**: Option strike price (OTM only: calls above spot, puts below)\n"
+            "- **DTE**: Days to expiration of the option\n"
+            "- **Entry**: Option premium at current market (×100 for SPX contract)\n"
+            "- **Full**: P&L if your full forecast move happens (spot → target, IV adjusts)\n"
+            "- **Half**: P&L if only 50% of the move happens\n"
+            "- **Flat**: P&L if spot stays unchanged (pure theta + slight IV decay)\n"
+            "- **Weighted**: Conviction-weighted average of Full/Half/Flat scenarios\n"
+            "- **W%**: Weighted P&L as % of entry premium\n"
+            "- **PoP**: Probability of Profit at expiry (BS-based, break-even adjusted)\n"
+            "- **EV**: Expected Value = Weighted P&L × PoP. "
+            "Best risk-adjusted metric. Higher = better.\n"
+            "- **Delta**: Option delta at entry. "
+            "Long Puts have negative delta (profit from drops), "
+            "Short Calls also profit from drops (positive theta, negative P&L exposure)\n"
+            "- **IV**: Implied volatility at entry from the smile curve. "
+            "Exit IV = Entry IV + projected IV change (not ATM swap)"
+        )
+
     sort_by = st.selectbox("Sort all tables by",
                             ["ev", "pnl", "pop", "roc"],
                             format_func=lambda x: {"ev": "Expected Value",
-                                "pnl": "P&L", "pop": "Prob. of Profit",
-                                "roc": "Return on Capital"}[x])
+                                "pnl": "P&L (full move)", "pop": "Prob. of Profit",
+                                "roc": "Return on Capital"}[x],
+                            help="EV (Expected Value) is the recommended sort: "
+                                 "it balances P&L potential with probability. "
+                                 "P&L sorts by full-move profit only. "
+                                 "PoP sorts by highest probability regardless of profit size. "
+                                 "ROC sorts by return on capital deployed.")
 
     # ── Per-type tables ──
     for leg in ["LC", "LP", "SC", "SP"]:
@@ -438,10 +470,17 @@ def display(res):
     st.markdown("### HeatMap")
     hc1, hc2 = st.columns(2)
     with hc1:
-        hm_leg = st.selectbox("Leg Type", ["LC", "LP", "SC", "SP"], key="hm_leg")
+        hm_leg = st.selectbox("Leg Type", ["LC", "LP", "SC", "SP"], key="hm_leg",
+            help="LC = Long Call (profit from rally), "
+                 "LP = Long Put (profit from drop), "
+                 "SC = Short Call (profit from flat/drop, theta income), "
+                 "SP = Short Put (profit from flat/rally, theta income)")
     with hc2:
         hm_color = st.radio("Color", ["P&L", "Score (EV)"],
-                              horizontal=True, key="hm_color")
+                              horizontal=True, key="hm_color",
+                              help="P&L: conviction-weighted profit/loss per contract. "
+                                   "Score (EV): P&L × Probability of Profit. "
+                                   "Green = profitable, Red = loss, White = break-even.")
 
     hm_data = df[df["leg"] == hm_leg].copy()
     if hm_data.empty:
@@ -571,25 +610,40 @@ def main():
 
     c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX").upper()
+        symbol = st.text_input("Symbol", value="^SPX",
+            help="Underlying to scan. ^SPX uses SPXW options via Yahoo Finance, "
+                 "with SPY fallback if SPXW unavailable.").upper()
     with c2:
         move_pct = st.number_input("Move %", value=-2.0,
             min_value=-20.0, max_value=20.0, step=0.5, format="%.1f",
-            help="Expected % move. Negative = bearish, positive = bullish.")
+            help="Your expected % move of the underlying. "
+                 "Negative = bearish (drop), positive = bullish (rally). "
+                 "Example: -2.0 means you expect a 2% drop. "
+                 "The system projects IV change automatically: "
+                 "drops increase IV (~4pts per 10% drop), rallies decrease IV (~2.5pts per 10%).")
     with c3:
         forecast_dte = st.number_input("Forecast DTE", value=5,
             min_value=1, max_value=30, step=1,
-            help="Days until expected move completes.")
+            help="Days until you expect the move to complete. "
+                 "This determines how much theta decay to factor in. "
+                 "Options are scanned at 3 DTEs: this value, ~14d, and ~30d. "
+                 "Shorter forecast = more theta impact on results.")
     with c4:
         conviction = st.number_input("Conviction %", value=50,
             min_value=10, max_value=90, step=10,
-            help="How confident in the forecast. "
-                 "Low = flat scenario dominates (favors shorts). "
-                 "High = full move dominates (favors longs).")
+            help="How confident you are in your forecast. Controls scenario weighting:\n"
+                 "- Full Move: your forecast hits exactly\n"
+                 "- Half Move: only 50% of expected move\n"
+                 "- Flat: market doesn't move, only theta works\n\n"
+                 "Low conviction (20%): 24% Full / 27% Half / 49% Flat → favors short options (theta income)\n"
+                 "Medium (50%): 38% Full / 30% Half / 32% Flat → balanced\n"
+                 "High (80%): 51% Full / 33% Half / 16% Flat → favors long options (directional bet)")
     with c5:
         default_step = 25 if "SPX" in symbol else 5
         strike_step = st.number_input("Strike Step", value=default_step,
-            min_value=1, max_value=50)
+            min_value=1, max_value=50,
+            help="Strike increment for scanning. Larger = faster but fewer results. "
+                 "SPX: 25 (scans every 25 pts), SPY: 5.")
 
     # Scan DTEs: forecast + 14d + 30d
     scan_targets = sorted(set([forecast_dte,
