@@ -50,5 +50,6 @@ pg = st.navigation([
     st.Page(str(pages_dir / "9_DoubleDiagonal.py"), title="Double Diagonal"),
     st.Page(str(pages_dir / "10_Prognose.py"), title="Prognose"),
     st.Page(str(pages_dir / "11_Verticals.py"), title="Verticals"),
+    st.Page(str(pages_dir / "12_CrawlingCrab.py"), title="Crawling Crab"),
 ])
 pg.run()
