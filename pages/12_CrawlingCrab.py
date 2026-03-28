@@ -1,16 +1,11 @@
 """
-Crawling Crab – Trend-following strategy with rolling short premium.
+Crawling Crab – Stock Replacement + Credit Spread income.
 
-Bull Crab (uptrend):
-  Lower Leg: Bull Put Spread (SP ~30Δ + LP ~20Δ, short DTE)
-  Upper Leg: Diagonal Call Spread (LC ~45Δ 90 DTE + SC ~30Δ short DTE)
+Bull Crab: Long Call LEAPS + Short Call monthly + Bull Put Spread (short DTE)
+Bear Crab: Long Put LEAPS + Short Put monthly + Bear Call Spread (short DTE)
 
-Bear Crab (downtrend):
-  Upper Leg: Bear Call Spread (SC ~30Δ + LC ~20Δ, short DTE)
-  Lower Leg: Diagonal Put Spread (LP ~45Δ 90 DTE + SP ~30Δ short DTE)
-
-Shorts are closed at 50% profit, then reopened. The long leg stays
-and accumulates value as the trend continues.
+Same as Stock Replacement but with an additional credit spread that
+increases per-cycle income and accelerates LEAPS financing.
 """
 
 import streamlit as st
@@ -47,459 +42,536 @@ def _iv(smile, strike, fallback):
     return fallback
 
 
-# ── Build ────────────────────────────────────────────────────────────────
+# ── Scan ─────────────────────────────────────────────────────────────────
 
-def build_crab(spot, r, q, iv_atm, step, direction,
-               short_dte, long_dte,
-               spread_delta_short, spread_delta_long,
-               diag_delta_long, diag_delta_short,
-               smile_put_s, smile_call_s, smile_put_l, smile_call_l):
-    """
-    Build a Crawling Crab position.
+def scan(spot, r, q, iv_atm, step, direction, target_pct, target_dte,
+         min_long_dte,
+         expirations_data, sc_dte_actual,
+         sc_smile_call, sc_smile_put,
+         sc_delta, sp_delta_short, sp_delta_long):
+    """Scan LEAPS + short diagonal + credit spread configurations."""
+    results = []
+    is_bull = direction == "Bull"
+    target_price = spot * (1 + target_pct / 100) if is_bull else spot * (1 - abs(target_pct) / 100)
+    T_s = sc_dte_actual / 365.0
 
-    direction: "Bull" or "Bear"
-    Returns result dict or None.
-    """
-    T_s = short_dte / 365.0
-    T_l = long_dte / 365.0
+    # ── Short-DTE legs (fixed across all LEAPS scans) ──
 
-    if direction == "Bull":
-        # Lower: Bull Put Spread (SP higher Δ, LP lower Δ, both short DTE)
-        try:
-            sp_k = _round(bs.solve_strike_for_delta(
-                -spread_delta_short, spot, T_s, r, iv_atm, q, "put"), step)
-            lp_k = _round(bs.solve_strike_for_delta(
-                -spread_delta_long, spot, T_s, r, iv_atm, q, "put"), step)
-        except Exception:
-            return None
-        if sp_k <= lp_k:
-            return None
+    # Diagonal short (same type as LEAPS)
+    diag_type = "call" if is_bull else "put"
+    try:
+        if is_bull:
+            sc_k = _round(bs.solve_strike_for_delta(sc_delta, spot, T_s, r, iv_atm, q, "call"), step)
+        else:
+            sc_k = _round(bs.solve_strike_for_delta(-sc_delta, spot, T_s, r, iv_atm, q, "put"), step)
+    except Exception:
+        return results, target_price
+    iv_sc = _iv(sc_smile_call if is_bull else sc_smile_put, sc_k, iv_atm)
+    sc = bs.calculate_all(spot, sc_k, T_s, r, iv_sc, q, diag_type)
 
-        # Upper: Diagonal Call (LC long DTE, SC short DTE)
-        try:
-            lc_k = _round(bs.solve_strike_for_delta(
-                diag_delta_long, spot, T_l, r, iv_atm, q, "call"), step)
-            sc_k = _round(bs.solve_strike_for_delta(
-                diag_delta_short, spot, T_s, r, iv_atm, q, "call"), step)
-        except Exception:
-            return None
+    # Credit spread (opposite type: puts for bull, calls for bear)
+    # SP and LP use same DTE; diagonal offset applied post-scan if enabled
+    spread_type = "put" if is_bull else "call"
+    spread_smile = sc_smile_put if is_bull else sc_smile_call
+    try:
+        if is_bull:
+            sp_k = _round(bs.solve_strike_for_delta(-sp_delta_short, spot, T_s, r, iv_atm, q, "put"), step)
+            lp_k = _round(bs.solve_strike_for_delta(-sp_delta_long, spot, T_s, r, iv_atm, q, "put"), step)
+            if sp_k <= lp_k:
+                return results, target_price
+        else:
+            sp_k = _round(bs.solve_strike_for_delta(sp_delta_short, spot, T_s, r, iv_atm, q, "call"), step)
+            lp_k = _round(bs.solve_strike_for_delta(sp_delta_long, spot, T_s, r, iv_atm, q, "call"), step)
+            if lp_k <= sp_k:
+                return results, target_price
+    except Exception:
+        return results, target_price
 
-        # Price all legs
-        iv_sp = _iv(smile_put_s, sp_k, iv_atm)
-        iv_lp = _iv(smile_put_s, lp_k, iv_atm)
-        iv_lc = _iv(smile_call_l, lc_k, iv_atm)
-        iv_sc = _iv(smile_call_s, sc_k, iv_atm)
+    iv_sp = _iv(spread_smile, sp_k, iv_atm)
+    iv_lp = _iv(spread_smile, lp_k, iv_atm)
+    sp = bs.calculate_all(spot, sp_k, T_s, r, iv_sp, q, spread_type)
+    lp = bs.calculate_all(spot, lp_k, T_s, r, iv_lp, q, spread_type)
+    spread_credit = sp["price"] - lp["price"]
 
-        sp = bs.calculate_all(spot, sp_k, T_s, r, iv_sp, q, "put")
-        lp = bs.calculate_all(spot, lp_k, T_s, r, iv_lp, q, "put")
-        lc = bs.calculate_all(spot, lc_k, T_l, r, iv_lc, q, "call")
-        sc = bs.calculate_all(spot, sc_k, T_s, r, iv_sc, q, "call")
+    if spread_credit <= 0:
+        return results, target_price
 
-        legs = [
-            {"label": "Short Put", "type": "put", "strike": sp_k, "dte": short_dte,
-             "long": False, "res": sp, "iv": iv_sp},
-            {"label": "Long Put", "type": "put", "strike": lp_k, "dte": short_dte,
-             "long": True, "res": lp, "iv": iv_lp},
-            {"label": "Long Call", "type": "call", "strike": lc_k, "dte": long_dte,
-             "long": True, "res": lc, "iv": iv_lc},
-            {"label": "Short Call", "type": "call", "strike": sc_k, "dte": short_dte,
-             "long": False, "res": sc, "iv": iv_sc},
-        ]
-        spread_label = "Bull Put"
-        diag_label = "Diagonal Call"
-        core_leg = lc
-        core_label = "Long Call"
+    # Cycle credit from all 3 short-DTE legs: SC + (SP - LP)
+    cycle_credit = sc["price"] + spread_credit
+    cycle_income = cycle_credit * 0.50
 
-    else:  # Bear
-        # Upper: Bear Call Spread (SC higher Δ, LC lower Δ, both short DTE)
-        try:
-            sc_k = _round(bs.solve_strike_for_delta(
-                spread_delta_short, spot, T_s, r, iv_atm, q, "call"), step)
-            lc_k = _round(bs.solve_strike_for_delta(
-                spread_delta_long, spot, T_s, r, iv_atm, q, "call"), step)
-        except Exception:
-            return None
-        if lc_k <= sc_k:
-            return None
+    # Theta from short-DTE legs only
+    theta_short = (-sc["theta_daily"] + sp["theta_daily"] - lp["theta_daily"])
+    days_to_50 = cycle_income / theta_short if theta_short > 0 else 30
 
-        # Lower: Diagonal Put (LP long DTE, SP short DTE)
-        try:
-            lp_k = _round(bs.solve_strike_for_delta(
-                -diag_delta_long, spot, T_l, r, iv_atm, q, "put"), step)
-            sp_k = _round(bs.solve_strike_for_delta(
-                -diag_delta_short, spot, T_s, r, iv_atm, q, "put"), step)
-        except Exception:
-            return None
+    # ── Scan LEAPS ──
 
-        iv_sc = _iv(smile_call_s, sc_k, iv_atm)
-        iv_lc = _iv(smile_call_s, lc_k, iv_atm)
-        iv_lp = _iv(smile_put_l, lp_k, iv_atm)
-        iv_sp = _iv(smile_put_s, sp_k, iv_atm)
+    for exp_str, chain_data in expirations_data.items():
+        dte = chain_data["dte_actual"]
+        if dte < max(60, min_long_dte) or dte > 548:
+            continue
+        if dte < target_dte + 30:
+            continue
+        T_l = dte / 365.0
+        smile = build_smile_curve(
+            chain_data["calls"] if is_bull else chain_data["puts"], spot)
 
-        sc = bs.calculate_all(spot, sc_k, T_s, r, iv_sc, q, "call")
-        lc = bs.calculate_all(spot, lc_k, T_s, r, iv_lc, q, "call")
-        lp = bs.calculate_all(spot, lp_k, T_l, r, iv_lp, q, "put")
-        sp = bs.calculate_all(spot, sp_k, T_s, r, iv_sp, q, "put")
+        for delta_target in [0.65, 0.60, 0.55, 0.50, 0.45, 0.40, 0.75, 0.70]:
+            try:
+                if is_bull:
+                    lc_k = _round(bs.solve_strike_for_delta(
+                        delta_target, spot, T_l, r, iv_atm, q, "call"), step)
+                    if sc_k <= lc_k:
+                        continue
+                else:
+                    lc_k = _round(bs.solve_strike_for_delta(
+                        -delta_target, spot, T_l, r, iv_atm, q, "put"), step)
+                    if sc_k >= lc_k:
+                        continue
+            except Exception:
+                continue
 
-        legs = [
-            {"label": "Short Call", "type": "call", "strike": sc_k, "dte": short_dte,
-             "long": False, "res": sc, "iv": iv_sc},
-            {"label": "Long Call", "type": "call", "strike": lc_k, "dte": short_dte,
-             "long": True, "res": lc, "iv": iv_lc},
-            {"label": "Long Put", "type": "put", "strike": lp_k, "dte": long_dte,
-             "long": True, "res": lp, "iv": iv_lp},
-            {"label": "Short Put", "type": "put", "strike": sp_k, "dte": short_dte,
-             "long": False, "res": sp, "iv": iv_sp},
-        ]
-        spread_label = "Bear Call"
-        diag_label = "Diagonal Put"
-        core_leg = lp
-        core_label = "Long Put"
+            iv_lc = _iv(smile, lc_k, iv_atm)
+            lc = bs.calculate_all(spot, lc_k, T_l, r, iv_lc, q, diag_type)
+            if lc["price"] < 0.50:
+                continue
 
-    # Aggregates
-    delta = sum((-1 if not l["long"] else 1) * l["res"]["delta"] for l in legs)
-    theta = sum((-1 if not l["long"] else 1) * l["res"]["theta_daily"] for l in legs)
-    vega = sum((-1 if not l["long"] else 1) * l["res"]["vega_pct"] for l in legs)
+            intrinsic = max(spot - lc_k, 0) if is_bull else max(lc_k - spot, 0)
+            extrinsic = lc["price"] - intrinsic
+            extrinsic_pct = extrinsic / lc["price"] * 100 if lc["price"] > 0 else 0
 
-    long_cost = sum(l["res"]["price"] for l in legs if l["long"])
-    short_income = sum(l["res"]["price"] for l in legs if not l["long"])
-    net_debit = long_cost - short_income
-    core_price = core_leg["price"]
+            cycles = max(1, int((dte - 45) / sc_dte_actual))
+            total_income = cycle_income * cycles
+            net = lc["price"] - total_income
 
-    # The 3 short-DTE legs (2 shorts + 1 long in spread) that get cycled
-    short_dte_legs = [l for l in legs if l["dte"] == short_dte]
-    # Net credit from these 3 legs: sold premium minus bought premium
-    cycle_credit = sum(
-        l["res"]["price"] * (1 if not l["long"] else -1)
-        for l in short_dte_legs
-    )
+            if is_bull:
+                be = lc_k + net
+                pnl_target = max(target_price - lc_k, 0) - lc["price"] + total_income
+            else:
+                be = lc_k - net
+                pnl_target = max(lc_k - target_price, 0) - lc["price"] + total_income
 
-    # Theta from short-DTE legs only (what drives the 50% target)
-    theta_short_dte = sum(
-        (-1 if not l["long"] else 1) * l["res"]["theta_daily"]
-        for l in short_dte_legs
-    )
+            if pnl_target <= 0:
+                continue
 
-    # Cycle economics: close all 3 short-DTE legs at 50% profit
-    profit_per_cycle = cycle_credit * 0.50
-    cycles_to_fund = core_price / profit_per_cycle if profit_per_cycle > 0 else 99
-    # Days to 50%: based on theta of short-DTE legs only
-    days_to_50 = profit_per_cycle / theta_short_dte if theta_short_dte > 0 else 99
+            roc = pnl_target / lc["price"] * 100 if lc["price"] > 0 else 0
+            leverage = abs(lc["delta"]) * spot / lc["price"] if lc["price"] > 0 else 0
 
-    return {
-        "legs": legs,
-        "direction": direction,
-        "spread_label": spread_label,
-        "diag_label": diag_label,
-        "core_label": core_label,
-        "core_price": core_price,
-        "delta": delta, "theta": theta, "vega": vega,
-        "short_income": short_income,
-        "long_cost": long_cost,
-        "net_debit": net_debit,
-        "cycle_credit": cycle_credit,
-        "profit_per_cycle": profit_per_cycle,
-        "cycles_to_fund": cycles_to_fund,
-        "days_to_50": days_to_50,
-        "short_dte": short_dte, "long_dte": long_dte,
-        "n_short_dte_legs": len(short_dte_legs),
-    }
+            # Annualized theta cost of LEAPS
+            hold_days = max(dte - 45, 30)
+            rolls_per_year = 365 / hold_days
+            try:
+                lc_exit = bs.calculate_all(spot, lc_k, 45/365, r, iv_lc, q, diag_type)
+                roll_loss = lc["price"] - lc_exit["price"]
+            except Exception:
+                roll_loss = lc["price"] * 0.5
+            annual_cost = roll_loss * rolls_per_year
+
+            # Cycles to fund & DTE after funding
+            cycles_to_fund = lc["price"] / cycle_income if cycle_income > 0 else 99
+            days_needed = cycles_to_fund * days_to_50
+            remaining_after = dte - days_needed
+
+            # Score
+            be_margin = (spot - be) / spot * 100 if is_bull else (be - spot) / spot * 100
+            cap_eff = min(extrinsic_pct / 50, 2.0)
+            theta_per_delta = annual_cost / max(abs(lc["delta"]), 0.1)
+            theta_eff = max(0.2, 1.0 - theta_per_delta / (spot * 0.5))
+            if dte < 120:
+                dte_eff = 0.3 + 0.7 * (dte / 120)
+            elif dte <= 400:
+                dte_eff = 1.0
+            else:
+                dte_eff = max(0.5, 1.0 - (dte - 400) / 400)
+            # Bonus for faster funding
+            fund_eff = max(0.3, 1.0 - cycles_to_fund / 20)
+            score = roc * max(0.1, 1 + be_margin / 10) * cap_eff * theta_eff * dte_eff * fund_eff
+
+            results.append({
+                "lc_k": lc_k, "sc_k": sc_k, "sp_k": sp_k, "lp_k": lp_k,
+                "leaps_dte": dte, "sc_dte": sc_dte_actual,
+                "delta": lc["delta"],
+                "leaps_cost": lc["price"],
+                "extrinsic_pct": extrinsic_pct,
+                "leverage": leverage,
+                "annual_cost": annual_cost,
+                "sc_premium": sc["price"],
+                "spread_credit": spread_credit,
+                "cycle_credit": cycle_credit,
+                "cycle_income": cycle_income,
+                "cycles": cycles,
+                "total_income": total_income,
+                "net_cost": net,
+                "breakeven": be,
+                "be_margin": be_margin,
+                "pnl_target": pnl_target,
+                "roc": roc, "score": score,
+                "cycles_to_fund": cycles_to_fund,
+                "days_to_50": days_to_50,
+                "remaining_after": remaining_after,
+                "exp": exp_str, "iv_lc": iv_lc, "opt_type": diag_type,
+                # Store short leg details for display
+                "sc_res": sc, "sp_res": sp, "lp_res": lp,
+                "iv_sc": iv_sc, "iv_sp": iv_sp, "iv_lp": iv_lp,
+                "spread_type": spread_type,
+            })
+
+    return results, target_price
 
 
 # ── Compute ──────────────────────────────────────────────────────────────
 
-def compute(symbol, step, direction, short_dte, long_dte,
-            spread_d_short, spread_d_long, diag_d_long, diag_d_short,
-            auto_mode=False, min_long_dte=60):
+def compute(symbol, step, direction, target_pct, target_dte,
+            min_long_dte, sc_delta, sp_d_short, sp_d_long, sc_dte_target,
+            auto_mode=False):
     spot, _ = resolve_spot_price(symbol)
     q = get_dividend_yield(symbol)
-    r = get_risk_free_rate(short_dte if short_dte > 0 else 14)
+    r = get_risk_free_rate(90)
     vix = get_vix()
-    iv = vix / 100.0 if not np.isnan(vix) else 0.20
+    iv = vix / 100.0 if not np.isnan(vix) else 0.30
     today = datetime.date.today()
 
-    if auto_mode:
+    try:
+        exps, _ = get_available_expirations(symbol)
+    except Exception as e:
+        raise ValueError(f"Could not fetch expirations: {e}")
+    if not exps:
+        raise ValueError(f"No expirations for {symbol}.")
+
+    chain_by_exp = {}
+    for exp_str in exps:
         try:
-            exps, _ = get_available_expirations(symbol)
-        except Exception as e:
-            raise ValueError(f"Could not fetch expirations: {e}")
-        if not exps:
-            raise ValueError(f"No expirations for {symbol}.")
+            d = (datetime.date.fromisoformat(exp_str) - today).days
+            if d >= 7:
+                ch, _, _ = resolve_options_chain(symbol, d)
+                actual_exp = ch["expiration"]
+                if actual_exp not in chain_by_exp:
+                    chain_by_exp[actual_exp] = ch
+        except Exception:
+            continue
+    if not chain_by_exp:
+        raise ValueError("Could not load option chains.")
 
-        # Load chains by unique expiration
-        chain_by_exp = {}
-        for exp_str in exps:
-            try:
-                d = (datetime.date.fromisoformat(exp_str) - today).days
-                if 5 <= d <= 180:
-                    ch, _, _ = resolve_options_chain(symbol, d)
-                    actual_exp = ch["expiration"]
-                    if actual_exp not in chain_by_exp:
-                        chain_by_exp[actual_exp] = ch
-            except Exception:
+    leaps_data = {e: c for e, c in chain_by_exp.items() if c["dte_actual"] >= 60}
+
+    if auto_mode:
+        # Scan across multiple short DTEs
+        all_results = []
+        short_dtes_seen = set()
+        for s_exp, s_chain in chain_by_exp.items():
+            s_dte = s_chain["dte_actual"]
+            if s_dte < 10 or s_dte > 50 or s_dte in short_dtes_seen:
                 continue
+            short_dtes_seen.add(s_dte)
 
-        if not chain_by_exp:
-            raise ValueError("Could not load option chains.")
+            sm_call = build_smile_curve(s_chain["calls"], spot)
+            sm_put = build_smile_curve(s_chain["puts"], spot)
 
-        all_exps = sorted(chain_by_exp.keys())
-        combos = []
+            results, target_price = scan(
+                spot, r, q, iv, step, direction, target_pct, target_dte,
+                min_long_dte, leaps_data, s_dte,
+                sm_call, sm_put,
+                sc_delta, sp_d_short, sp_d_long)
+            all_results.extend(results)
 
-        for s_exp in all_exps:
-            cs = chain_by_exp[s_exp]
-            s_dte = cs["dte_actual"]
-            if s_dte < 7 or s_dte > 30:
-                continue
-
-            sm_ps = build_smile_curve(cs["puts"], spot)
-            sm_cs = build_smile_curve(cs["calls"], spot)
-
-            for l_exp in all_exps:
-                cl = chain_by_exp[l_exp]
-                l_dte = cl["dte_actual"]
-                if l_dte < max(45, min_long_dte) or l_dte <= s_dte * 2:
-                    continue
-
-                sm_pl = build_smile_curve(cl["puts"], spot)
-                sm_cl = build_smile_curve(cl["calls"], spot)
-
-                res = build_crab(spot, r, q, iv, step, direction,
-                                  s_dte, l_dte,
-                                  spread_d_short, spread_d_long,
-                                  diag_d_long, diag_d_short,
-                                  sm_ps, sm_cs, sm_pl, sm_cl)
-                if res is None:
-                    continue
-                if res["cycles_to_fund"] <= 0 or res["days_to_50"] <= 0:
-                    continue
-
-                res["symbol"] = symbol
-                res["spot"] = spot
-                res["vix"] = vix
-                res["r"] = r
-                res["q"] = q
-                res["exp_short"] = cs["expiration"]
-                res["exp_long"] = cl["expiration"]
-
-                weeks = res["cycles_to_fund"] * res["days_to_50"] / 7
-                days_needed = res["cycles_to_fund"] * res["days_to_50"]
-                remaining_after_cycles = l_dte - days_needed
-                # Skip if long would be in heavy theta decay zone after funding
-                if remaining_after_cycles < min_long_dte * 0.5:
-                    continue
-
-                combos.append({
-                    "short_dte": s_dte,
-                    "long_dte": l_dte,
-                    "cycle_credit": res["cycle_credit"],
-                    "days_to_50": res["days_to_50"],
-                    "cycles": res["cycles_to_fund"],
-                    "weeks": weeks,
-                    "days_needed": days_needed,
-                    "remaining": remaining_after_cycles,
-                    "net_debit": res["net_debit"],
-                    "theta": res["theta"],
-                    "delta": res["delta"],
-                    "_full": dict(res),
-                })
-
-        if not combos:
+        if not all_results:
             raise ValueError("No valid configurations found.")
+        all_results.sort(key=lambda x: x["score"], reverse=True)
 
-        combos.sort(key=lambda x: x["weeks"])
-        best = combos[0]["_full"]
-        best["dte_scan"] = combos[:10]
-        return best
-
+        return {
+            "symbol": symbol, "spot": spot, "vix": vix, "iv": iv,
+            "r": r, "q": q, "direction": direction,
+            "target_price": target_price, "target_pct": target_pct,
+            "target_dte": target_dte,
+            "sc_dte_actual": all_results[0]["sc_dte"],
+            "sc_exp": all_results[0]["exp"],
+            "all_results": all_results,
+            "chain_by_exp": chain_by_exp,
+        }
     else:
-        ch_s, _, _ = resolve_options_chain(symbol, short_dte)
-        ch_l, _, _ = resolve_options_chain(symbol, long_dte)
+        sc_exp = min(chain_by_exp.keys(),
+                      key=lambda e: abs(chain_by_exp[e]["dte_actual"] - sc_dte_target))
+        sc_chain = chain_by_exp[sc_exp]
+        sc_smile_call = build_smile_curve(sc_chain["calls"], spot)
+        sc_smile_put = build_smile_curve(sc_chain["puts"], spot)
 
-        sm_ps = build_smile_curve(ch_s["puts"], spot)
-        sm_cs = build_smile_curve(ch_s["calls"], spot)
-        sm_pl = build_smile_curve(ch_l["puts"], spot)
-        sm_cl = build_smile_curve(ch_l["calls"], spot)
+        results, target_price = scan(
+            spot, r, q, iv, step, direction, target_pct, target_dte,
+            min_long_dte, leaps_data, sc_chain["dte_actual"],
+            sc_smile_call, sc_smile_put,
+            sc_delta, sp_d_short, sp_d_long)
 
-        result = build_crab(spot, r, q, iv, step, direction,
-                             ch_s["dte_actual"], ch_l["dte_actual"],
-                             spread_d_short, spread_d_long,
-                             diag_d_long, diag_d_short,
-                             sm_ps, sm_cs, sm_pl, sm_cl)
+        if not results:
+            raise ValueError("No valid configurations found.")
+        results.sort(key=lambda x: x["score"], reverse=True)
 
-        if result is None:
-            raise ValueError("Could not construct Crawling Crab.")
-
-        result["symbol"] = symbol
-        result["spot"] = spot
-        result["vix"] = vix
-        result["r"] = r
-        result["q"] = q
-        result["exp_short"] = ch_s["expiration"]
-        result["exp_long"] = ch_l["expiration"]
-        result["dte_scan"] = None
-        return result
+        return {
+            "symbol": symbol, "spot": spot, "vix": vix, "iv": iv,
+            "r": r, "q": q, "direction": direction,
+            "target_price": target_price, "target_pct": target_pct,
+            "target_dte": target_dte,
+            "sc_dte_actual": sc_chain["dte_actual"], "sc_exp": sc_exp,
+            "all_results": results,
+            "chain_by_exp": chain_by_exp,
+        }
 
 
 # ── Display ──────────────────────────────────────────────────────────────
 
-LEG_CFG = {
-    "Leg": st.column_config.TextColumn("Leg", help="Position type: Short/Long Put/Call"),
-    "Strike": st.column_config.TextColumn("Strike", help="Option strike price"),
-    "Delta": st.column_config.TextColumn("Delta", help="Option delta at entry"),
-    "IV": st.column_config.TextColumn("IV", help="Implied volatility from smile curve"),
-    "Price": st.column_config.TextColumn("Price", help="Option premium per point (×100 for contract value)"),
-    "DTE": st.column_config.NumberColumn("DTE", help="Days to expiration"),
-    "Exp": st.column_config.TextColumn("Exp", help="Expiration date"),
-    "Role": st.column_config.TextColumn("Role", help="Which part of the strategy this leg serves"),
+SCAN_CFG = {
+    "LEAPS": st.column_config.TextColumn("LEAPS", help="LEAPS strike"),
+    "SC": st.column_config.TextColumn("SC", help="Short diagonal strike"),
+    "Spread": st.column_config.TextColumn("Spread", help="Credit spread strikes (short/long)"),
+    "L DTE": st.column_config.NumberColumn("L DTE", help="LEAPS days to expiration"),
+    "S DTE": st.column_config.NumberColumn("S DTE", help="Short-DTE legs expiration"),
+    "Delta": st.column_config.TextColumn("Delta", help="LEAPS delta"),
+    "Cost": st.column_config.TextColumn("Cost", help="LEAPS premium (×100)"),
+    "Cyc Cred": st.column_config.TextColumn("Cyc Cred",
+        help="Per-cycle credit: SC premium + spread credit, at 50% (×100)"),
+    "Cyc": st.column_config.NumberColumn("Cyc", help="Cycles possible"),
+    "CycFund": st.column_config.TextColumn("CycFund",
+        help="Cycles needed to fully finance the LEAPS"),
+    "WksFund": st.column_config.TextColumn("WksFund",
+        help="Weeks to fully fund = cycles × days to 50% / 7"),
+    "BE": st.column_config.TextColumn("BE", help="Break-even at expiry"),
+    "P&L": st.column_config.TextColumn("P&L", help="Profit at target (×100)"),
+    "ROC": st.column_config.TextColumn("ROC", help="Return on Capital at target"),
 }
 
 
 def display(res):
     spot = res["spot"]
+    target = res["target_price"]
     direction = res["direction"]
-    name = f"{'Bull' if direction == 'Bull' else 'Bear'} Crab"
+    is_bull = direction == "Bull"
+    name = "Bull Crab" if is_bull else "Bear Crab"
+    opt_label = "Call" if is_bull else "Put"
+    spread_label = "Bull Put" if is_bull else "Bear Call"
 
     st.markdown("---")
-    st.markdown(f"### {res['symbol']} @ {spot:,.2f}  |  VIX {res['vix']:.1f}  |  {name}")
+    move_str = f"+{res['target_pct']:.0f}%" if is_bull else f"-{abs(res['target_pct']):.0f}%"
+    st.markdown(f"### {res['symbol']} @ {spot:,.2f}  |  VIX {res['vix']:.1f}  |  "
+                f"Target ${target:,.0f} ({move_str}) in {res['target_dte']}d  |  {name}")
 
-    # Structure table
-    st.markdown("### Structure")
-    leg_rows = []
-    for l in res["legs"]:
-        role = res["spread_label"] if l["dte"] == res["short_dte"] and (
-            (direction == "Bull" and l["type"] == "put") or
-            (direction == "Bear" and l["type"] == "call")
-        ) else res["diag_label"]
-        leg_rows.append({
-            "Leg": l["label"],
-            "Strike": f"{l['strike']:,.0f}",
-            "Delta": f"{l['res']['delta']:.3f}",
-            "IV": f"{l['iv']*100:.1f}%",
-            "Price": f"${l['res']['price']:.2f}",
-            "DTE": l["dte"],
-            "Exp": res["exp_short"] if l["dte"] == res["short_dte"] else res["exp_long"],
-            "Role": role,
-        })
-    st.dataframe(pd.DataFrame(leg_rows), use_container_width=True,
-                  hide_index=True, column_config=LEG_CFG)
+    df = pd.DataFrame(res["all_results"])
 
-    # Key metrics
-    st.markdown("### Position Metrics")
-    days_needed = res["cycles_to_fund"] * res["days_to_50"]
-    remaining_dte = res["long_dte"] - days_needed
+    # Top picks
+    st.markdown("### Best Configurations")
+    top = df.head(15).copy()
+    disp = pd.DataFrame({
+        "LEAPS": top["lc_k"].map(lambda x: f"{x:,.0f}"),
+        "SC": top["sc_k"].map(lambda x: f"{x:,.0f}"),
+        "Spread": top.apply(lambda r: f"{r['sp_k']:,.0f}/{r['lp_k']:,.0f}", axis=1),
+        "L DTE": top["leaps_dte"],
+        "S DTE": top["sc_dte"],
+        "Delta": top["delta"].map(lambda x: f"{abs(x):.2f}"),
+        "Cost": top["leaps_cost"].map(lambda x: f"${x*100:,.0f}"),
+        "Cyc Cred": top["cycle_income"].map(lambda x: f"${x*100:,.0f}"),
+        "Cyc": top["cycles"],
+        "CycFund": top["cycles_to_fund"].map(lambda x: f"{x:.1f}"),
+        "WksFund": top.apply(lambda r: f"{r['cycles_to_fund']*r['days_to_50']/7:.1f}", axis=1),
+        "BE": top["breakeven"].map(lambda x: f"${x:,.1f}"),
+        "P&L": top["pnl_target"].map(lambda x: f"${x*100:+,.0f}"),
+        "ROC": top["roc"].map(lambda x: f"{x:+.0f}%"),
+    })
+    st.dataframe(disp, use_container_width=True, hide_index=True, column_config=SCAN_CFG)
 
+    # Select
+    options = [f"LEAPS {abs(r['lc_k']):.0f}{opt_label[0]} ({r['leaps_dte']}d, "
+               f"Δ{abs(r['delta']):.2f}) + SC {r['sc_k']:.0f} + "
+               f"{spread_label} {r['sp_k']:.0f}/{r['lp_k']:.0f} → ROC {r['roc']:+.0f}%"
+               for _, r in df.head(10).iterrows()]
+    if not options:
+        return
+    idx = st.selectbox("Select configuration", range(len(options)),
+                        format_func=lambda i: options[i], key="crab_sel")
+    pick = df.iloc[idx]
+
+    # Position table
+    st.markdown("### Position")
+    lc_res = bs.calculate_all(spot, pick["lc_k"],
+                               pick["leaps_dte"]/365, res["r"], pick["iv_lc"], res["q"],
+                               pick["opt_type"])
+    leg_rows = [
+        {"Leg": f"Long {opt_label} (LEAPS)", "Strike": f"${pick['lc_k']:,.0f}",
+         "Delta": f"{lc_res['delta']:.3f}", "IV": f"{pick['iv_lc']*100:.1f}%",
+         "Price": f"${pick['leaps_cost']*100:,.0f}", "DTE": pick["leaps_dte"],
+         "Role": f"Diagonal {opt_label}"},
+        {"Leg": f"Short {opt_label}", "Strike": f"${pick['sc_k']:,.0f}",
+         "Delta": f"{pick['sc_res']['delta']:.3f}", "IV": f"{pick['iv_sc']*100:.1f}%",
+         "Price": f"${pick['sc_res']['price']*100:,.0f}", "DTE": pick["sc_dte"],
+         "Role": f"Diagonal {opt_label}"},
+    ]
+    sp_type = "Put" if is_bull else "Call"
+
+    # Diagonal spread offset: LP gets +20% DTE if enabled
+    diag_on = res.get("diag_spread", False)
+    sc_dte_val = int(pick["sc_dte"])
+    if diag_on:
+        lp_dte_min = round(sc_dte_val * 1.20)
+        # Find next available expiration >= +20%
+        avail_dtes = sorted(c["dte_actual"] for c in res["chain_by_exp"].values())
+        lp_dte_val = sc_dte_val  # fallback
+        for d in avail_dtes:
+            if d >= lp_dte_min and d > sc_dte_val:
+                lp_dte_val = d
+                break
+        lp_role = f"{spread_label} Spread (Diag +{lp_dte_val - sc_dte_val}d)"
+    else:
+        lp_dte_val = sc_dte_val
+        lp_role = f"{spread_label} Spread"
+
+    leg_rows.extend([
+        {"Leg": f"Short {sp_type}", "Strike": f"${pick['sp_k']:,.0f}",
+         "Delta": f"{pick['sp_res']['delta']:.3f}", "IV": f"{pick['iv_sp']*100:.1f}%",
+         "Price": f"${pick['sp_res']['price']*100:,.0f}", "DTE": sc_dte_val,
+         "Role": f"{spread_label} Spread"},
+        {"Leg": f"Long {sp_type}", "Strike": f"${pick['lp_k']:,.0f}",
+         "Delta": f"{pick['lp_res']['delta']:.3f}", "IV": f"{pick['iv_lp']*100:.1f}%",
+         "Price": f"${pick['lp_res']['price']*100:,.0f}",
+         "DTE": lp_dte_val,
+         "Role": lp_role},
+    ])
+    st.dataframe(pd.DataFrame(leg_rows), use_container_width=True, hide_index=True)
+
+    # Economics
+    st.markdown("### Economics")
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Net Debit", f"${res['net_debit']*100:,.0f}",
-              help="Total cost to open: long premiums minus short premiums (×100)")
-    m2.metric("Delta", f"{res['delta']:.3f}",
-              help="Net position delta. Bull Crab: positive. Bear Crab: negative.")
-    m3.metric("Theta/day", f"${res['theta']*100:+,.0f}",
-              help="Daily theta income (×100). Positive = earning from short decay.")
-    m4.metric("Days to 50%", f"{res['days_to_50']:.0f}d",
-              help="Estimated days until short-DTE legs reach 50% of entry credit.")
-    m5.metric(f"{res['core_label']} Cost", f"${res['core_price']*100:,.0f}",
-              help=f"Cost of the core long-dated {res['core_label']} that stays open.")
-    m6.metric("DTE after Funding", f"{remaining_dte:.0f}d",
-              delta="safe" if remaining_dte > 45 else "at risk",
-              delta_color="normal" if remaining_dte > 45 else "inverse",
-              help="Remaining DTE on the core long after all funding cycles complete. "
-                   "Below 45d → theta accelerates, reducing the long's value.")
+    m1.metric("LEAPS Cost", f"${pick['leaps_cost']*100:,.0f}",
+              help=f"Capital required (vs shares: ${spot*100:,.0f})")
+    m2.metric("Cycle Credit", f"${pick['cycle_income']*100:,.0f}",
+              help="Per-cycle income at 50%: SC premium + spread credit")
+    m3.metric("Cycles to Fund", f"{pick['cycles_to_fund']:.1f}",
+              help=f"Cycles to fully pay for the LEAPS")
+    m4.metric("Days to 50%", f"{pick['days_to_50']:.0f}d",
+              help="Days per cycle until short-DTE legs reach 50% profit")
+    m5.metric("Weeks to Fund", f"{pick['cycles_to_fund'] * pick['days_to_50'] / 7:.1f}",
+              help="Total weeks = cycles × days per cycle / 7")
+    remaining = pick["remaining_after"]
+    m6.metric("DTE after Funding", f"{remaining:.0f}d",
+              delta="safe" if remaining > 45 else "at risk",
+              delta_color="normal" if remaining > 45 else "inverse",
+              help="LEAPS DTE remaining after all funding cycles")
 
-    if remaining_dte < 30:
-        st.warning(
-            f"The core {res['core_label']} will only have ~{remaining_dte:.0f} days "
-            f"remaining after {res['cycles_to_fund']:.0f} funding cycles. "
-            f"Consider a longer Long DTE or fewer cycles needed."
-        )
+    if remaining < 30:
+        st.warning(f"LEAPS has only ~{remaining:.0f}d after funding. "
+                   "Consider longer LEAPS DTE.")
 
-    # Cycle economics
-    st.markdown("### Cycle Economics")
-    e1, e2, e3, e4 = st.columns(4)
-    e1.metric("Cycle Credit", f"${res['cycle_credit']*100:,.0f}",
-              help="Net credit from the 3 short-DTE legs (2 shorts + 1 long in spread). "
-                   "This is the total premium you collect per cycle.")
-    e2.metric("50% Profit/Cycle", f"${res['profit_per_cycle']*100:,.0f}",
-              help="Close all 3 short-DTE legs when they've decayed to 50% of entry credit.")
-    e3.metric("Cycles to Fund", f"{res['cycles_to_fund']:.1f}",
-              help=f"Number of cycles to fully pay for the {res['core_label']}")
-    e4.metric("Weeks to Fund", f"{res['cycles_to_fund'] * res['days_to_50'] / 7:.1f}",
-              help="Estimated weeks until the core long is fully financed")
+    # Comparison
+    st.markdown(f"### {name} vs 100 Shares")
+    shares_label = "100 Shares Long" if is_bull else "100 Shares Short"
+    pnl_stock = abs(target - spot)
+    comp = [
+        {"": "Capital", name: f"${pick['leaps_cost']*100:,.0f}",
+         shares_label: f"${spot*100:,.0f}",
+         "": f"${(spot-pick['leaps_cost'])*100:,.0f} saved"},
+        {"": "Monthly Income", name: f"${pick['cycle_income']*100:,.0f}",
+         shares_label: "$0", "": ""},
+        {"": f"P&L @ ${target:,.0f}", name: f"${pick['pnl_target']*100:+,.0f}",
+         shares_label: f"${pnl_stock*100:+,.0f}",
+         "": f"ROC {pick['roc']:+.0f}% vs {pnl_stock/spot*100:+.0f}%"},
+        {"": "Break-Even", name: f"${pick['breakeven']:,.1f}",
+         shares_label: f"${spot:,.2f}", "": ""},
+    ]
+    st.dataframe(pd.DataFrame(comp), use_container_width=True, hide_index=True)
 
-    n = res.get("n_short_dte_legs", 3)
-    st.caption(
-        f"Each cycle: open {n} short-DTE legs (2 shorts + 1 long in spread) → "
-        f"wait ~{res['days_to_50']:.0f} days → "
-        f"close all {n} at 50% profit (${res['profit_per_cycle']*100:,.0f}) → repeat. "
-        f"After ~{res['cycles_to_fund']:.0f} cycles, the {res['core_label']} is fully paid for."
-    )
+    # Scenario chart
+    st.markdown("### Scenario Analysis")
+    import plotly.graph_objects as go
+    scenarios = []
+    for pct in [-30, -20, -10, -5, 0, 5, 10, 15, 20, 30, 40, 50]:
+        s_end = spot * (1 + pct / 100)
+        if is_bull:
+            leaps_val = max(s_end - pick["lc_k"], 0)
+        else:
+            leaps_val = max(pick["lc_k"] - s_end, 0)
+        crab_pnl = (leaps_val - pick["leaps_cost"] + pick["total_income"]) * 100
+        stock_pnl = (s_end - spot) * 100 if is_bull else (spot - s_end) * 100
+        scenarios.append({"spot": s_end, "crab": crab_pnl, "stock": stock_pnl})
 
-    # OptionStrat + IBKR
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=[s["spot"] for s in scenarios], y=[s["crab"] for s in scenarios],
+        mode="lines+markers", name=name, line=dict(color="#1f77b4", width=2)))
+    fig.add_trace(go.Scatter(
+        x=[s["spot"] for s in scenarios], y=[s["stock"] for s in scenarios],
+        mode="lines+markers", name=shares_label,
+        line=dict(color="#aaa", width=1, dash="dash")))
+    fig.add_vline(x=spot, line_dash="dot", line_color="gray",
+                  annotation_text=f"Spot ${spot:,.0f}")
+    fig.add_vline(x=target, line_dash="dot", line_color="green",
+                  annotation_text=f"Target ${target:,.0f}")
+    fig.add_vline(x=pick["breakeven"], line_dash="dot", line_color="orange",
+                  annotation_text=f"BE ${pick['breakeven']:,.1f}")
+    fig.add_hline(y=0, line_color="gray", line_width=0.5)
+    fig.update_layout(template="plotly_white", height=400,
+        xaxis_title="Stock Price at LEAPS Expiry",
+        yaxis_title="P&L ($, per contract)",
+        margin=dict(l=60, r=20, t=30, b=40))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Export
     st.markdown("### Export")
-    os_legs = []
-    for l in res["legs"]:
-        os_legs.append({
-            "strike": int(l["strike"]),
-            "option_type": l["type"],
-            "expiration": res["exp_short"] if l["dte"] == res["short_dte"] else res["exp_long"],
-            "long": l["long"],
-            "qty": 1,
-            "price": float(l["res"]["price"]),
-        })
-
-    os_sorted = sorted(os_legs, key=lambda x: (x["long"], x["option_type"] != "put"))
-
+    # Find expirations for export
+    sc_exp_pick = min(res["chain_by_exp"].keys(),
+                       key=lambda e: abs(res["chain_by_exp"][e]["dte_actual"] - sc_dte_val))
+    lp_exp_pick = min(res["chain_by_exp"].keys(),
+                       key=lambda e: abs(res["chain_by_exp"][e]["dte_actual"] - lp_dte_val))
+    os_legs = [
+        {"strike": int(pick["lc_k"]), "option_type": pick["opt_type"],
+         "expiration": str(pick["exp"]), "long": True, "qty": 1},
+        {"strike": int(pick["sc_k"]), "option_type": pick["opt_type"],
+         "expiration": str(sc_exp_pick), "long": False, "qty": 1},
+        {"strike": int(pick["sp_k"]), "option_type": pick["spread_type"],
+         "expiration": str(sc_exp_pick), "long": False, "qty": 1},
+        {"strike": int(pick["lp_k"]), "option_type": pick["spread_type"],
+         "expiration": str(lp_exp_pick), "long": True, "qty": 1},
+    ]
+    os_sorted = sorted(os_legs, key=lambda l: (l["long"], l["option_type"] != "put"))
     e1, e2 = st.columns(2)
     with e1:
         url = bs.optionstrat_url(res["symbol"], os_sorted)
         if url:
             st.markdown(f"[Full Position: OptionStrat]({url})")
     with e2:
-        csv = bs.ibkr_basket_csv(res["symbol"], os_sorted, tag="CrawlingCrab")
-        clean_sym = res["symbol"].replace("^", "")
+        csv = bs.ibkr_basket_csv(res["symbol"], os_sorted, tag="CrawlCrab")
         st.download_button("IBKR Basket CSV", csv,
-                            f"crab_{clean_sym}.csv", "text/csv")
+                            f"crab_{res['symbol'].replace('^','')}.csv", "text/csv")
 
-    # Separate links: spread + diagonal
-    spread_legs = [l for l in os_legs
-                   if (direction == "Bull" and l["option_type"] == "put") or
-                      (direction == "Bear" and l["option_type"] == "call")]
-    diag_legs = [l for l in os_legs
-                 if (direction == "Bull" and l["option_type"] == "call") or
-                    (direction == "Bear" and l["option_type"] == "put")]
-
+    # Separate links
+    diag_legs = os_legs[:2]
+    spread_legs = os_legs[2:]
     c1, c2 = st.columns(2)
     with c1:
-        url_sp = bs.optionstrat_url(res["symbol"], spread_legs)
-        if url_sp:
-            st.markdown(f"[{res['spread_label']} Spread]({url_sp})")
+        url_d = bs.optionstrat_url(res["symbol"], diag_legs)
+        if url_d:
+            st.markdown(f"[Diagonal {opt_label}]({url_d})")
     with c2:
-        url_diag = bs.optionstrat_url(res["symbol"], diag_legs)
-        if url_diag:
-            st.markdown(f"[{res['diag_label']}]({url_diag})")
+        url_s = bs.optionstrat_url(res["symbol"], spread_legs)
+        if url_s:
+            st.markdown(f"[{spread_label} Spread]({url_s})")
 
-    # Management guide
-    with st.expander("Management Playbook"):
+    with st.expander("Strategy Guide"):
         st.markdown(
-            f"**Entry:**\n"
-            f"- Open all 4 legs simultaneously\n"
-            f"- Net debit: ${res['net_debit']*100:,.0f}\n\n"
-            f"**Cycle Management (repeat every ~{res['days_to_50']:.0f} days):**\n"
-            f"1. Monitor the 3 short-DTE legs ({res['spread_label']} spread + "
-            f"{res['diag_label']} short leg)\n"
-            f"2. When the combined credit decays to 50% → close all 3 short-DTE legs\n"
-            f"3. The {res['core_label']} ({res['long_dte']} DTE) stays open\n"
-            f"4. Open 3 new short-DTE legs at current delta targets\n\n"
-            f"**{res['core_label']} Management:**\n"
-            f"- If still OTM after several cycles: keep rolling short-DTE legs against it\n"
-            f"- If approaching ATM/ITM: let it run in profit, buy a new {res['core_label']} "
-            f"further along the trend\n"
-            f"- Goal: accumulate multiple ITM {res['core_label']}s over weeks/months\n\n"
-            f"**Risk:**\n"
-            f"- Trend reversal: {res['core_label']} loses value, short-DTE legs may get tested\n"
-            f"- Max loss on spread: "
-            f"${abs(res['legs'][0]['strike'] - res['legs'][1]['strike'])*100:,.0f} per contract\n"
-            f"- {res['core_label']} has defined risk (premium paid: "
-            f"${res['core_price']*100:,.0f})"
+            f"**{name} = Diagonal {opt_label} + {spread_label} Spread**\n\n"
+            f"**4 Legs:**\n"
+            f"- Long {opt_label} {pick['lc_k']:.0f} ({pick['leaps_dte']}d): "
+            f"${pick['leaps_cost']*100:,.0f} — the core trend bet\n"
+            f"- Short {opt_label} {pick['sc_k']:.0f} ({pick['sc_dte']}d): "
+            f"${pick['sc_res']['price']*100:,.0f} — diagonal income\n"
+            f"- Short {sp_type} {pick['sp_k']:.0f} ({pick['sc_dte']}d): "
+            f"${pick['sp_res']['price']*100:,.0f} — spread income\n"
+            f"- Long {sp_type} {pick['lp_k']:.0f} ({pick['sc_dte']}d): "
+            f"${pick['lp_res']['price']*100:,.0f} — spread protection\n\n"
+            f"**Cycle (~{pick['days_to_50']:.0f}d):**\n"
+            f"1. Close all 3 short-DTE legs at 50% profit → ${pick['cycle_income']*100:,.0f}\n"
+            f"2. The LEAPS stays open\n"
+            f"3. Open 3 new short-DTE legs at current deltas\n"
+            f"4. After ~{pick['cycles_to_fund']:.0f} cycles, LEAPS is fully funded\n\n"
+            f"**LEAPS Management:**\n"
+            f"- OTM: keep cycling shorts against it\n"
+            f"- ATM/ITM: let it run in profit, buy new LEAPS further along trend\n"
+            f"- Goal: accumulate ITM LEAPS over weeks/months"
         )
 
 
@@ -508,96 +580,66 @@ def display(res):
 def main():
     st.markdown(CSS, unsafe_allow_html=True)
     st.title("Crawling Crab")
-    st.caption("Trend-following strategy: long-dated directional bet "
-               "financed by rolling short premium cycles.")
+    st.caption("Stock Replacement + Credit Spread income. "
+               "The credit spread accelerates LEAPS financing.")
 
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="GOOGL",
             help="Underlying to trade.").upper()
     with c2:
         direction = st.selectbox("Direction", ["Bull", "Bear"],
-            help="Bull Crab: uptrend (Bull Put Spread + Diagonal Call). "
-                 "Bear Crab: downtrend (Bear Call Spread + Diagonal Put).")
+            help="Bull: Long Call LEAPS + Short Call + Bull Put Spread. "
+                 "Bear: Long Put LEAPS + Short Put + Bear Call Spread.")
     with c3:
-        default_step = 25 if "SPX" in symbol else 5
-        step = st.number_input("Strike Step", value=default_step,
-            min_value=1, max_value=50,
-            help="Strike increment for rounding.")
+        target_pct = st.number_input("Target %", value=20.0,
+            min_value=5.0, max_value=100.0, step=5.0, format="%.0f",
+            help="Expected % move. Bull +20% = stock rises 20%.")
     with c4:
-        mode = st.radio("Mode", ["Auto", "Manual DTEs"], horizontal=True,
-            help="Auto scans all DTE combinations and finds the one "
-                 "that minimizes weeks to fund the core long.")
+        target_dte = st.number_input("Target DTE", value=270,
+            min_value=30, max_value=730, step=30,
+            help="Days until target. LEAPS must outlast this + 30d buffer.")
 
-    if mode == "Manual DTEs":
-        st.markdown("#### DTEs")
-        dt1, dt2, dt3 = st.columns(3)
-        with dt1:
-            short_dte = st.number_input("Short DTE", value=14,
-                min_value=7, max_value=30,
-                help="DTE for the 3 short-DTE legs. 10-20 days is ideal for theta.")
-        with dt2:
-            long_dte = st.number_input("Long DTE", value=90,
-                min_value=45, max_value=180,
-                help="DTE for the core long leg. 90 days gives time for the trend.")
-        with dt3:
-            min_long_dte = st.number_input("Min Long DTE", value=60,
-                min_value=30, max_value=120,
-                help="Minimum acceptable DTE for the core long. "
-                     "The long must have enough time to survive all funding cycles "
-                     "without entering heavy theta decay (typically below 45 DTE).")
-    else:
-        short_dte = long_dte = 0
+    c5, c6, c7, c8, c9, c10, c11 = st.columns([1, 1, 1, 1, 1, 1, 1])
+    with c5:
+        mode = st.radio("Mode", ["Auto", "Manual"], horizontal=True,
+            help="Auto scans all short DTEs (10-50d). Manual uses fixed short DTE.")
+    with c6:
+        diag_spread = st.toggle("Diagonal Spread", value=True,
+            help="Long leg of credit spread gets +20% DTE. "
+                 "Better IV-spike protection, minimal cost.")
+    with c7:
         min_long_dte = st.number_input("Min Long DTE", value=60,
-            min_value=30, max_value=120,
-            help="Minimum acceptable DTE for the core long. "
-                 "Auto mode filters out combinations where the long DTE is too short "
-                 "to survive the funding cycles. "
-                 "Rule: Long DTE must be > cycles × days per cycle + this buffer.")
+            min_value=30, max_value=180,
+            help="Minimum remaining DTE after funding cycles complete.")
+    with c8:
+        sc_delta = st.number_input("Diag Short Δ", value=0.30,
+            min_value=0.15, max_value=0.45, step=0.05, format="%.2f",
+            help="Delta for the short leg of the diagonal.")
+    with c9:
+        sp_d_short = st.number_input("Spread Short Δ", value=0.30,
+            min_value=0.15, max_value=0.45, step=0.05, format="%.2f",
+            help="Delta of the short leg in the credit spread.")
+    with c10:
+        sp_d_long = st.number_input("Spread Long Δ", value=0.20,
+            min_value=0.05, max_value=0.35, step=0.05, format="%.2f",
+            help="Delta of the long (protective) leg in the spread.")
+    with c11:
+        sc_dte = st.number_input("Short DTE", value=30,
+            min_value=14, max_value=60,
+            help="DTE for short-DTE legs (Manual mode only).")
 
-    st.markdown("#### Delta Targets")
-    if direction == "Bull":
-        st.caption("Bull Crab: Bull Put Spread (lower) + Diagonal Call (upper)")
-    else:
-        st.caption("Bear Crab: Bear Call Spread (upper) + Diagonal Put (lower)")
-
-    d1, d2, d3, d4 = st.columns(4)
-    with d1:
-        spread_d_short = st.number_input(
-            "Spread Short Δ", value=0.30,
-            min_value=0.15, max_value=0.50, step=0.05, format="%.2f",
-            help="Delta of the short leg in the credit spread. "
-                 "Higher = more premium but closer to ATM (more risk).")
-    with d2:
-        spread_d_long = st.number_input(
-            "Spread Long Δ", value=0.20,
-            min_value=0.05, max_value=0.40, step=0.05, format="%.2f",
-            help="Delta of the long (protective) leg in the credit spread. "
-                 "Lower = cheaper protection, wider spread.")
-    with d3:
-        diag_d_long = st.number_input(
-            "Diagonal Long Δ", value=0.45,
-            min_value=0.25, max_value=0.60, step=0.05, format="%.2f",
-            help="Delta of the core long-dated leg (the trend bet). "
-                 "Higher = more expensive but higher delta exposure. "
-                 "This leg stays open across multiple cycles.")
-    with d4:
-        diag_d_short = st.number_input(
-            "Diagonal Short Δ", value=0.30,
-            min_value=0.15, max_value=0.50, step=0.05, format="%.2f",
-            help="Delta of the short leg in the diagonal spread. "
-                 "Premium received partially finances the long leg.")
+    step = 5 if spot_guess(symbol) > 50 else 1
 
     if st.button(f"Build {'Bull' if direction == 'Bull' else 'Bear'} Crab",
                   type="primary", use_container_width=True):
-        with st.spinner("Building position..."):
+        with st.spinner("Scanning configurations..."):
             try:
                 result = compute(symbol, step, direction,
-                                  short_dte, long_dte,
-                                  spread_d_short, spread_d_long,
-                                  diag_d_long, diag_d_short,
-                                  auto_mode=(mode != "Manual DTEs"),
-                                  min_long_dte=min_long_dte)
+                                  target_pct, target_dte, min_long_dte,
+                                  sc_delta, sp_d_short, sp_d_long, sc_dte,
+                                  auto_mode=(mode == "Auto"))
+                result["diag_spread"] = diag_spread
                 st.session_state["crab_result"] = result
             except Exception as e:
                 st.error(f"Error: {e}")
@@ -609,65 +651,16 @@ def main():
         st.info("Set parameters and click Build.")
         return
 
-    result = st.session_state["crab_result"]
-    scan = result.get("dte_scan")
+    display(st.session_state["crab_result"])
 
-    if scan and len(scan) > 1:
-        st.markdown("---")
-        st.markdown(f"### {result['symbol']} @ {result['spot']:,.2f}  |  "
-                    f"VIX {result['vix']:.1f}")
-        st.markdown("### DTE Optimization")
-        st.caption("Sorted by fewest weeks to fund the core long position.")
 
-        DTE_CFG = {
-            "#": st.column_config.NumberColumn("#", help="Rank"),
-            "Short": st.column_config.NumberColumn("Short", help="Short-DTE legs"),
-            "Long": st.column_config.NumberColumn("Long", help="Core long DTE"),
-            "Credit/Cyc": st.column_config.TextColumn("Credit/Cyc",
-                help="Net credit from 3 short-DTE legs per cycle (×100)"),
-            "Days50": st.column_config.TextColumn("Days50",
-                help="Estimated days until short-DTE legs reach 50% profit"),
-            "Cycles": st.column_config.TextColumn("Cycles",
-                help="Number of cycles to fully fund the core long"),
-            "Weeks": st.column_config.TextColumn("Weeks",
-                help="Total weeks to fund = cycles × days50 / 7"),
-            "Remaining": st.column_config.TextColumn("Remaining",
-                help="DTE remaining on core long after all funding cycles complete. "
-                     "Should be > 30d to avoid theta acceleration."),
-            "Net Debit": st.column_config.TextColumn("Net Debit",
-                help="Initial net cost of the full 4-leg position (×100)"),
-            "Delta": st.column_config.TextColumn("Delta",
-                help="Net position delta"),
-        }
-
-        rows = []
-        for i, s in enumerate(scan):
-            rows.append({
-                "#": i + 1,
-                "Short": s["short_dte"],
-                "Long": s["long_dte"],
-                "Credit/Cyc": f"${s['cycle_credit']*100:,.0f}",
-                "Days50": f"{s['days_to_50']:.0f}",
-                "Cycles": f"{s['cycles']:.1f}",
-                "Weeks": f"{s['weeks']:.1f}",
-                "Remaining": f"{s['remaining']:.0f}d",
-                "Net Debit": f"${s['net_debit']*100:,.0f}",
-                "Delta": f"{s['delta']:.3f}",
-            })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True,
-                      hide_index=True, column_config=DTE_CFG)
-
-        options = [f"#{i+1}: {s['short_dte']}/{s['long_dte']}d "
-                   f"({s['weeks']:.1f} weeks, {s['cycles']:.1f} cycles)"
-                   for i, s in enumerate(scan)]
-        idx = st.selectbox("Result", range(len(options)),
-                            format_func=lambda i: options[i],
-                            key="crab_sel")
-        active = scan[idx]["_full"]
-    else:
-        active = result
-
-    display(active)
+def spot_guess(symbol):
+    s = symbol.upper().replace("^", "")
+    if s in ("SPX", "GSPC", "NDX"):
+        return 5000
+    if s in ("SPY", "QQQ", "IWM"):
+        return 400
+    return 200
 
 
 main()

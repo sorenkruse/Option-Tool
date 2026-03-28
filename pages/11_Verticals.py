@@ -87,8 +87,9 @@ def calc_pop_spread(spot, k_short, k_long, T, r, iv, q, spread_type):
 
 def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
                    forecast_dte, strike_step, expirations_data,
-                   scan_dtes, conviction, widths):
-    """Scan vertical spreads across all strikes, DTEs, and widths."""
+                   scan_dtes, conviction, widths, lp_dte_offset_pct=20):
+    """Scan vertical spreads across all strikes, DTEs, and widths.
+    Long legs get +lp_dte_offset_pct% more DTE for better vega protection."""
     w_full = 0.15 + 0.45 * conviction
     w_half = 0.25 + 0.10 * conviction
     w_flat = 1.0 - w_full - w_half
@@ -100,6 +101,11 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
     strike_low = _round(spot * 0.92, strike_step)
     strike_high = _round(spot * 1.08, strike_step)
     strikes = np.arange(strike_low, strike_high + strike_step, strike_step)
+
+    # Map DTEs to expirations for finding long-leg chain
+    dte_to_exp = {}
+    for exp_str, ch in expirations_data.items():
+        dte_to_exp[ch["dte_actual"]] = (exp_str, ch)
 
     results = []
 
@@ -114,6 +120,28 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
         remaining_dte = max(dte - forecast_dte, 1)
         T_entry = dte / 365.0
         T_exit = remaining_dte / 365.0
+
+        # Long leg: find next available chain with >= +20% more DTE
+        long_dte_min = round(dte * (1 + lp_dte_offset_pct / 100))
+        # Find the closest DTE that is strictly > dte (next expiration out)
+        candidates = [d for d in dte_to_exp.keys() if d >= long_dte_min and d > dte]
+        if candidates:
+            closest_long_dte = min(candidates)
+            long_exp_str, long_chain = dte_to_exp[closest_long_dte]
+            long_call_smile = build_smile_curve(long_chain["calls"], spot)
+            long_put_smile = build_smile_curve(long_chain["puts"], spot)
+            long_dte_actual = closest_long_dte
+            T_entry_long = long_dte_actual / 365.0
+            remaining_long = max(long_dte_actual - forecast_dte, 1)
+            T_exit_long = remaining_long / 365.0
+        else:
+            # No offset chain available, use same DTE
+            long_call_smile = call_smile
+            long_put_smile = put_smile
+            long_dte_actual = dte
+            long_exp_str = exp_str
+            T_entry_long = T_entry
+            T_exit_long = T_exit
 
         for width in widths:
             offset = strike_step * width
@@ -145,12 +173,13 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
 
                 for spread_name, opt_type, k_short, k_long, is_debit in spreads:
                     smile = call_smile if opt_type == "call" else put_smile
+                    long_smile = long_call_smile if opt_type == "call" else long_put_smile
                     iv_short = _iv(smile, k_short, iv_atm)
-                    iv_long = _iv(smile, k_long, iv_atm)
+                    iv_long = _iv(long_smile, k_long, iv_atm)
 
                     try:
                         short_entry = bs.calculate_all(spot, k_short, T_entry, r, iv_short, q, opt_type)
-                        long_entry = bs.calculate_all(spot, k_long, T_entry, r, iv_long, q, opt_type)
+                        long_entry = bs.calculate_all(spot, k_long, T_entry_long, r, iv_long, q, opt_type)
                     except Exception:
                         continue
 
@@ -185,7 +214,7 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
                         iv_l_e = max(iv_l + iv_shift_val, 0.05)
                         try:
                             se = bs.calculate_all(s_target, k_short, T_exit, r, iv_s_e, q, opt_type)["price"]
-                            le = bs.calculate_all(s_target, k_long, T_exit, r, iv_l_e, q, opt_type)["price"]
+                            le = bs.calculate_all(s_target, k_long, T_exit_long, r, iv_l_e, q, opt_type)["price"]
                             return se, le
                         except Exception:
                             return None, None
@@ -223,7 +252,9 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
                         "k_long": k_long,
                         "width": offset,
                         "dte": dte,
+                        "dte_long": long_dte_actual,
                         "exp": exp_str,
+                        "exp_long": long_exp_str,
                         "opt_type": opt_type,
                         "credit": credit,
                         "net_cost": net_cost,
@@ -250,7 +281,8 @@ VERT_COL_CFG = {
     "Short K": st.column_config.TextColumn("Short K", help="Strike of the sold (short) leg"),
     "Long K": st.column_config.TextColumn("Long K", help="Strike of the bought (long) leg, defines risk boundary"),
     "Width": st.column_config.TextColumn("Width", help="Distance between strikes in points"),
-    "DTE": st.column_config.NumberColumn("DTE", help="Days to expiration"),
+    "S DTE": st.column_config.NumberColumn("S DTE", help="Short leg days to expiration"),
+    "L DTE": st.column_config.NumberColumn("L DTE", help="Long leg DTE (+20% offset for vega protection)"),
     "Premium": st.column_config.TextColumn("Premium", help="Net credit received or debit paid (×100 per contract)"),
     "Full": st.column_config.TextColumn("Full", help="P&L if your full forecast move happens"),
     "Half": st.column_config.TextColumn("Half", help="P&L if only 50% of the move happens"),
@@ -268,7 +300,8 @@ VERT_TOP_CFG = {
     "Short": st.column_config.TextColumn("Short", help="Short leg strike"),
     "Long": st.column_config.TextColumn("Long", help="Long leg strike"),
     "Width": st.column_config.TextColumn("Width", help="Distance between strikes"),
-    "DTE": st.column_config.NumberColumn("DTE", help="Days to expiration"),
+    "S DTE": st.column_config.NumberColumn("S DTE", help="Short leg DTE"),
+    "L DTE": st.column_config.NumberColumn("L DTE", help="Long leg DTE (+20% offset)"),
     "Premium": st.column_config.TextColumn("Premium", help="Net credit or debit per contract (×100)"),
     "Full": st.column_config.TextColumn("Full", help="P&L at full forecast move"),
     "Half": st.column_config.TextColumn("Half", help="P&L at half move"),
@@ -280,10 +313,10 @@ VERT_TOP_CFG = {
 
 
 def _fmt_table(df_sub):
-    d = df_sub[["k_short", "k_long", "width", "dte", "net_cost",
+    d = df_sub[["k_short", "k_long", "width", "dte", "dte_long", "net_cost",
                  "pnl_full", "pnl_half", "pnl_flat", "pnl_w", "pnl_pct",
                  "max_loss", "pop", "ev", "delta"]].copy()
-    d.columns = ["Short K", "Long K", "Width", "DTE", "Premium",
+    d.columns = ["Short K", "Long K", "Width", "S DTE", "L DTE", "Premium",
                   "Full", "Half", "Flat", "Weighted", "W%",
                   "Max Loss", "PoP", "EV", "Delta"]
     d["Short K"]  = d["Short K"].map(lambda x: f"{x:,.0f}")
@@ -345,7 +378,8 @@ def display(res):
                 "Short": f"{row['k_short']:,.0f}",
                 "Long": f"{row['k_long']:,.0f}",
                 "Width": f"{row['width']:,.0f}",
-                "DTE": row["dte"],
+                "S DTE": row["dte"],
+                "L DTE": row.get("dte_long", row["dte"]),
                 "Premium": f"${row['net_cost']*100:,.0f}",
                 "Full": f"${row['pnl_full']*100:+,.0f}",
                 "Half": f"${row['pnl_half']*100:+,.0f}",
@@ -376,7 +410,7 @@ def display(res):
                  "long": False, "qty": 1},
                 {"strike": int(float(top["k_long"])),
                  "option_type": str(top["opt_type"]),
-                 "expiration": str(top["exp"]),
+                 "expiration": str(top.get("exp_long", top["exp"])),
                  "long": True, "qty": 1},
             ]
             all_legs.extend(legs)
@@ -492,7 +526,7 @@ def display(res):
 # ── Compute ──────────────────────────────────────────────────────────────
 
 def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
-            conviction, widths):
+            conviction, widths, lp_dte_offset_pct=20):
     spot, _ = resolve_spot_price(symbol)
     q = get_dividend_yield(symbol)
     r = get_risk_free_rate(forecast_dte)
@@ -526,6 +560,8 @@ def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
     scan_dtes = set()
     expirations_data = {}
     errors = []
+
+    # Load chains for target DTEs first
     for target_dte in scan_dte_targets:
         best_exp = min(exp_dte.keys(), key=lambda e: abs(exp_dte[e] - target_dte))
         if best_exp in expirations_data:
@@ -538,12 +574,29 @@ def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
             errors.append(str(e))
             continue
 
+    # Load additional chains for offset (next expiration out)
+    if lp_dte_offset_pct > 0:
+        loaded_dtes = {c["dte_actual"] for c in expirations_data.values()}
+        for base_dte in list(loaded_dtes):
+            min_offset_dte = round(base_dte * (1 + lp_dte_offset_pct / 100))
+            offset_candidates = [(e, d) for e, d in exp_dte.items()
+                                  if d >= min_offset_dte and d not in loaded_dtes
+                                  and e not in expirations_data]
+            if offset_candidates:
+                best = min(offset_candidates, key=lambda x: x[1])
+                try:
+                    ch, _, _ = resolve_options_chain(symbol, best[1])
+                    expirations_data[ch["expiration"]] = ch
+                    loaded_dtes.add(ch["dte_actual"])
+                except Exception:
+                    pass
+
     if not expirations_data:
         raise ValueError(f"Could not load chains. Errors: {'; '.join(errors)}")
 
     results = scan_verticals(spot, r, q, iv_now, target_spot, iv_target,
                               forecast_dte, strike_step, expirations_data,
-                              scan_dtes, conviction, widths)
+                              scan_dtes, conviction, widths, lp_dte_offset_pct)
 
     return {
         "symbol": symbol, "spot": spot, "vix": vix,
@@ -562,37 +615,31 @@ def main():
     st.caption("Forecast-driven vertical spread scanner. "
                "Finds the best credit and debit spreads for your directional view.")
 
-    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+    c1, c2, c3, c4, c5, c6 = st.columns([2, 1, 1, 1, 1, 1])
     with c1:
         symbol = st.text_input("Symbol", value="^SPX",
-            help="Underlying to scan. ^SPX uses SPXW options with SPY fallback.").upper()
+            help="Underlying to scan.").upper()
     with c2:
         move_pct = st.number_input("Move %", value=-2.0,
             min_value=-20.0, max_value=20.0, step=0.5, format="%.1f",
-            help="Expected % move. Negative = bearish, positive = bullish. "
-                 "IV adjusts automatically: -2% drop → IV +0.8%, +2% rally → IV -0.5%. "
-                 "Bearish favors Bear Put (debit) + Bull Put (credit). "
-                 "Bullish favors Bull Call (debit) + Bear Call (credit).")
+            help="Expected % move. Negative = bearish, positive = bullish.")
     with c3:
         forecast_dte = st.number_input("Forecast DTE", value=5,
             min_value=1, max_value=30, step=1,
-            help="Days until expected move. Scans 3 DTEs: "
-                 "this value, ~14d, ~30d. Shorter DTE = higher theta impact, "
-                 "longer DTE = more time for the move to develop.")
+            help="Days until expected move. Scans 3 DTEs: this, ~14d, ~30d.")
     with c4:
         conviction = st.number_input("Conviction %", value=50,
             min_value=10, max_value=90, step=10,
-            help="Weights the 3 scenarios (Full/Half/Flat move):\n"
-                 "Low (20%): 24/27/49% → credit spreads dominate (theta income in flat)\n"
-                 "Mid (50%): 38/30/32% → balanced\n"
-                 "High (80%): 51/33/16% → debit spreads dominate (directional bet)")
+            help="Scenario weighting. Low → flat favors credits. High → favors debits.")
     with c5:
         default_step = 25 if "SPX" in symbol else 5
         strike_step = st.number_input("Strike Step", value=default_step,
             min_value=1, max_value=50,
-            help="Strike increment. Determines spread widths: "
-                 "scans at 1× and 2× this value. "
-                 "SPX with step 25 → spreads of $25 and $50 width.")
+            help="Strike increment. Spreads at 1× and 2× this value.")
+    with c6:
+        diag_spread = st.toggle("Diagonal Spread", value=True,
+            help="Long leg gets +20% more DTE than short leg. "
+                 "Better vega protection in IV spikes.")
 
     scan_targets = sorted(set([forecast_dte,
                                 max(forecast_dte, 14),
@@ -604,7 +651,9 @@ def main():
             try:
                 result = compute(symbol, move_pct, forecast_dte,
                                   strike_step, scan_targets,
-                                  conviction / 100.0, widths)
+                                  conviction / 100.0, widths,
+                                  lp_dte_offset_pct=20 if diag_spread else 0)
+                result["diag_spread"] = diag_spread
                 st.session_state["vert_result"] = result
             except Exception as e:
                 st.error(f"Error: {e}")
