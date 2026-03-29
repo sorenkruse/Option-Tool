@@ -48,6 +48,9 @@ PAGE_INFO = {
     "Crawling Crab": "Trend-following: LEAPS + Short Diagonal + Credit Spread. "
                      "Rolling short premium finances the core long position. "
                      "Auto-DTE optimization.",
+    "Lizards": "Renewal trades for Crawling Crab cycles. "
+               "Reverse Jade Lizard (bull) or Jade Lizard (bear). "
+               "Scans all short DTEs for optimal daily income.",
     "Stock Replacement": "Replace stock with PMCC (bull) or PMCP (bear). "
                          "LEAPS + monthly short options. "
                          "Scenario analysis vs 100 shares.",
@@ -74,6 +77,7 @@ PAGES = [
     ("Prognose",          "10_Prognose.py"),
     ("Verticals",         "11_Verticals.py"),
     ("Crawling Crab",     "12_CrawlingCrab.py"),
+    ("Lizards",           "14_Lizards.py"),
     ("Stock Replacement", "13_StockReplacement.py"),
     ("Double Diagonal",   "9_DoubleDiagonal.py"),
     ("Flyagonal",         "8_Flyagonal.py"),

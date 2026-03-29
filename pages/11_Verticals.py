@@ -153,12 +153,12 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
 
                 # Bull Put: SP at k_anchor (higher), LP at k_anchor - offset
                 k_sp, k_lp = k_anchor, k_anchor - offset
-                if k_sp < spot and k_sp <= spot * 0.98 and k_lp > spot * 0.85:
+                if k_sp < spot and k_sp <= spot * 0.99 and k_lp > spot * 0.85:
                     spreads.append(("Bull Put", "put", k_sp, k_lp, False))
 
                 # Bear Call: SC at k_anchor (lower), LC at k_anchor + offset
                 k_sc, k_lc = k_anchor, k_anchor + offset
-                if k_sc > spot and k_sc >= spot * 1.02 and k_lc < spot * 1.15:
+                if k_sc > spot and k_sc >= spot * 1.01 and k_lc < spot * 1.15:
                     spreads.append(("Bear Call", "call", k_sc, k_lc, False))
 
                 # Bull Call: LC at k_anchor (lower), SC at k_anchor + offset
@@ -434,19 +434,25 @@ def display(res):
                                 f"vert_all_{clean_sym}.csv", "text/csv", key="csv_v_all")
         with r2:
             if credit_legs:
+                cr_types = [s for s in ("Bull Put", "Bear Call")
+                            if any(stype == s for stype, _ in per_type_data)]
+                cr_label = " + ".join(cr_types) if cr_types else "Credits"
                 cr_sorted = sorted(credit_legs, key=lambda l: (l["long"], l["option_type"] != "put"))
                 url_cr = bs.optionstrat_url(res["symbol"], cr_sorted)
                 if url_cr:
-                    st.markdown(f"[Credits: Bull Put + Bear Call]({url_cr})")
+                    st.markdown(f"[Credits: {cr_label}]({url_cr})")
                 csv_cr = bs.ibkr_basket_csv(res["symbol"], cr_sorted, tag="Credits")
                 st.download_button("Credits IBKR CSV", csv_cr,
                                     f"vert_credits_{clean_sym}.csv", "text/csv", key="csv_v_cr")
         with r3:
             if debit_legs:
+                db_types = [s for s in ("Bull Call", "Bear Put")
+                            if any(stype == s for stype, _ in per_type_data)]
+                db_label = " + ".join(db_types) if db_types else "Debits"
                 db_sorted = sorted(debit_legs, key=lambda l: (l["long"], l["option_type"] != "put"))
                 url_db = bs.optionstrat_url(res["symbol"], db_sorted)
                 if url_db:
-                    st.markdown(f"[Debits: Bull Call + Bear Put]({url_db})")
+                    st.markdown(f"[Debits: {db_label}]({url_db})")
                 csv_db = bs.ibkr_basket_csv(res["symbol"], db_sorted, tag="Debits")
                 st.download_button("Debits IBKR CSV", csv_db,
                                     f"vert_debits_{clean_sym}.csv", "text/csv", key="csv_v_db")
