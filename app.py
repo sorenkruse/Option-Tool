@@ -38,6 +38,7 @@ if not check_password():
 pages_dir = Path(__file__).parent / "pages"
 
 PAGE_INFO = {
+    "Home": "Overview of all 14 tools with descriptions and workflow guide.",
     "Optimizer": "PoP + Target-Zone scoring for single options. "
                  "Finds the best risk/reward across strikes and DTEs.",
     "Prognose": "Forecast-driven scanner with conviction model. "
@@ -73,6 +74,7 @@ PAGE_INFO = {
 }
 
 PAGES = [
+    ("Home",              "0_Home.py"),
     ("Optimizer",         "4_Optimizer.py"),
     ("Prognose",          "10_Prognose.py"),
     ("Verticals",         "11_Verticals.py"),

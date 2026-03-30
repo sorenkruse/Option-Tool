@@ -98,9 +98,21 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
     half_iv = project_iv(iv_atm, spot, half_spot)
     flat_iv = max(iv_atm - 0.005, 0.05)
 
-    strike_low = _round(spot * 0.92, strike_step)
-    strike_high = _round(spot * 1.08, strike_step)
+    # Strike range: based on expected move, not static ±8%
+    # Credit spreads: 1% to ~3% beyond expected move (cushion)
+    # Debit spreads: near the money on the move side
+    move_pct = abs(target_spot - spot) / spot
+    cushion = max(move_pct + 0.03, 0.02)  # at least 2% OTM, at most move+3%
+    strike_low = _round(spot * (1 - cushion - 0.02), strike_step)
+    strike_high = _round(spot * (1 + cushion + 0.02), strike_step)
     strikes = np.arange(strike_low, strike_high + strike_step, strike_step)
+
+    # Boundaries for credit spread short legs:
+    # Must be OTM but not excessively far from expected move
+    put_min_otm = spot * 0.995    # at least 0.5% OTM
+    put_max_otm = spot * (1 - min(cushion, 0.06))  # not more than cushion or 6%
+    call_min_otm = spot * 1.005
+    call_max_otm = spot * (1 + min(cushion, 0.06))
 
     # Map DTEs to expirations for finding long-leg chain
     dte_to_exp = {}
@@ -153,12 +165,12 @@ def scan_verticals(spot, r, q, iv_atm, target_spot, target_iv,
 
                 # Bull Put: SP at k_anchor (higher), LP at k_anchor - offset
                 k_sp, k_lp = k_anchor, k_anchor - offset
-                if k_sp < spot and k_sp <= spot * 0.99 and k_lp > spot * 0.85:
+                if k_sp < put_min_otm and k_sp >= put_max_otm and k_lp > spot * 0.85:
                     spreads.append(("Bull Put", "put", k_sp, k_lp, False))
 
                 # Bear Call: SC at k_anchor (lower), LC at k_anchor + offset
                 k_sc, k_lc = k_anchor, k_anchor + offset
-                if k_sc > spot and k_sc >= spot * 1.01 and k_lc < spot * 1.15:
+                if k_sc > call_min_otm and k_sc <= call_max_otm and k_lc < spot * 1.15:
                     spreads.append(("Bear Call", "call", k_sc, k_lc, False))
 
                 # Bull Call: LC at k_anchor (lower), SC at k_anchor + offset

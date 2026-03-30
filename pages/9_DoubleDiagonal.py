@@ -47,16 +47,19 @@ def _iv(smile, strike, fallback):
 def build(spot, r, q, iv_atm, step, put_delta, call_delta,
           short_dte, long_dte,
           smile_put_s, smile_put_l, smile_call_s, smile_call_l,
-          wing=1, iv_floor=0.15, fast=False):
+          wing=1, iv_floor=0.15, fast=False, lc_long_dte=None,
+          smile_call_lc=None):
     """
     Build a Double Diagonal (wing>=1) or Double Calendar (wing=0).
 
-    iv_floor: minimum IV to test resilience (e.g. 0.15 for SPX).
-    fast: if True, skip P&L curve (for DTE scanning speed).
-    Returns result dict or None.
+    lc_long_dte: if set, Long Call uses this DTE instead of long_dte.
+                 Creates asymmetric structure (Crawling Crab Light).
+    smile_call_lc: smile for LC's expiration (required if lc_long_dte set).
     """
     T_s = short_dte / 365.0
     T_l = long_dte / 365.0
+    T_lc = (lc_long_dte or long_dte) / 365.0
+    actual_lc_dte = lc_long_dte or long_dte
 
     try:
         sp_k = _round(bs.solve_strike_for_delta(put_delta, spot, T_s, r, iv_atm, q, "put"), step)
@@ -72,12 +75,12 @@ def build(spot, r, q, iv_atm, step, put_delta, call_delta,
     iv_sp = _iv(smile_put_s, sp_k, iv_atm)
     iv_lp = _iv(smile_put_l, lp_k, iv_atm)
     iv_sc = _iv(smile_call_s, sc_k, iv_atm)
-    iv_lc = _iv(smile_call_l, lc_k, iv_atm)
+    iv_lc = _iv(smile_call_lc if smile_call_lc is not None else smile_call_l, lc_k, iv_atm)
 
     sp = bs.calculate_all(spot, sp_k, T_s, r, iv_sp, q, "put")
     lp = bs.calculate_all(spot, lp_k, T_l, r, iv_lp, q, "put")
     sc = bs.calculate_all(spot, sc_k, T_s, r, iv_sc, q, "call")
-    lc = bs.calculate_all(spot, lc_k, T_l, r, iv_lc, q, "call")
+    lc = bs.calculate_all(spot, lc_k, T_lc, r, iv_lc, q, "call")
 
     signs = [-1, 1, -1, 1]
     greeks = [sp, lp, sc, lc]
@@ -91,17 +94,18 @@ def build(spot, r, q, iv_atm, step, put_delta, call_delta,
     call_edge = abs(sc["theta_daily"]) / max(abs(lc["theta_daily"]), 1e-4)
 
     # ── P&L at short expiry (current IV) ──
-    remaining = (long_dte - short_dte) / 365.0
+    remaining_lp = (long_dte - short_dte) / 365.0
+    remaining_lc = (actual_lc_dte - short_dte) / 365.0
+    remaining = remaining_lp  # for backward compat in _pnl_at
     if fast:
-        # Quick estimate: P&L at spot, ±3%, ±5%
         test_spots = [spot * m for m in [0.95, 0.97, 1.0, 1.03, 1.05]]
         pnls_quick = []
         for S_t in test_spots:
             pnls_quick.append(_pnl_at(S_t, spot, sp_k, lp_k, sc_k, lc_k,
-                                       remaining, r, q, iv_lp, iv_lc, cost))
+                                       remaining_lp, r, q, iv_lp, iv_lc, cost,
+                                       remaining_lc))
         max_profit = max(pnls_quick)
         max_loss = min(pnls_quick)
-        # Rough zone: spots where pnl > 0
         zone_spots = [s for s, p in zip(test_spots, pnls_quick) if p > 0]
         zone_low = min(zone_spots) if zone_spots else spot
         zone_high = max(zone_spots) if zone_spots else spot
@@ -110,7 +114,8 @@ def build(spot, r, q, iv_atm, step, put_delta, call_delta,
         curve = []
         for S_t in np.linspace(spot * 0.90, spot * 1.10, 100):
             pnl = _pnl_at(S_t, spot, sp_k, lp_k, sc_k, lc_k,
-                           remaining, r, q, iv_lp, iv_lc, cost)
+                           remaining_lp, r, q, iv_lp, iv_lc, cost,
+                           remaining_lc)
             curve.append({"spot": S_t, "pnl": pnl})
         pnls = [p["pnl"] for p in curve]
         max_profit = max(pnls)
@@ -124,16 +129,16 @@ def build(spot, r, q, iv_atm, step, put_delta, call_delta,
     days_to_50 = target_50 / theta if theta > 0 else 999
 
     # ── P&L at IV floor (spot flat, IV drops to floor) ──
-    # Simulate: at ~60% of short DTE elapsed, spot unchanged, IV = floor
     mid_dte = max(short_dte * 0.6, 1)
     T_s_mid = mid_dte / 365.0
     T_l_mid = (long_dte - (short_dte - mid_dte)) / 365.0
+    T_lc_mid = (actual_lc_dte - (short_dte - mid_dte)) / 365.0
     iv_f = max(iv_floor, 0.05)
     try:
         sp_f = bs.calculate_all(spot, sp_k, T_s_mid, r, iv_f, q, "put")["price"]
         lp_f = bs.calculate_all(spot, lp_k, T_l_mid, r, iv_f, q, "put")["price"]
         sc_f = bs.calculate_all(spot, sc_k, T_s_mid, r, iv_f, q, "call")["price"]
-        lc_f = bs.calculate_all(spot, lc_k, T_l_mid, r, iv_f, q, "call")["price"]
+        lc_f = bs.calculate_all(spot, lc_k, T_lc_mid, r, iv_f, q, "call")["price"]
         pnl_at_floor = (-sp_f + lp_f - sc_f + lc_f) - cost
     except Exception:
         pnl_at_floor = -cost
@@ -148,24 +153,27 @@ def build(spot, r, q, iv_atm, step, put_delta, call_delta,
         "zone_low": zone_low, "zone_high": zone_high,
         "pnl_curve": curve,
         "short_dte": short_dte, "long_dte": long_dte,
+        "lc_long_dte": actual_lc_dte,
         "days_to_50": days_to_50, "target_50": target_50,
         "pnl_at_floor": pnl_at_floor, "iv_floor": iv_floor,
     }
 
 
 def _pnl_at(S_t, spot, sp_k, lp_k, sc_k, lc_k, remaining, r, q,
-            iv_lp, iv_lc, cost):
+            iv_lp, iv_lc, cost, remaining_lc=None):
     """P&L at short expiry for a given spot."""
     sp_v = -max(sp_k - S_t, 0)
     sc_v = -max(S_t - sc_k, 0)
     iv_p = iv_lp * (1 + 0.4 * max(0, (spot - S_t) / spot))
     iv_c = iv_lc * (1 + 0.4 * max(0, (S_t - spot) / spot))
+    T_lp = remaining
+    T_lc = remaining_lc if remaining_lc is not None else remaining
     try:
-        lp_v = bs.calculate_all(S_t, lp_k, remaining, r, iv_p, q, "put")["price"]
+        lp_v = bs.calculate_all(S_t, lp_k, T_lp, r, iv_p, q, "put")["price"]
     except Exception:
         lp_v = max(lp_k - S_t, 0)
     try:
-        lc_v = bs.calculate_all(S_t, lc_k, remaining, r, iv_c, q, "call")["price"]
+        lc_v = bs.calculate_all(S_t, lc_k, T_lc, r, iv_c, q, "call")["price"]
     except Exception:
         lc_v = max(S_t - lc_k, 0)
     return sp_v + lp_v + sc_v + lc_v - cost
@@ -213,7 +221,8 @@ def score(res, spot):
 # ── Compute ───────────────────────────────────────────────────────────────
 
 def compute(symbol, step, mode, short_dte_in, long_dte_in,
-            put_delta, call_delta, bias_pct, wing, iv_floor=0.15):
+            put_delta, call_delta, bias_pct, wing, iv_floor=0.15,
+            asym_lc=False):
     spot, _ = resolve_spot_price(symbol)
     q = get_dividend_yield(symbol)
     r = get_risk_free_rate(short_dte_in if short_dte_in > 0 else 10)
@@ -231,17 +240,18 @@ def compute(symbol, step, mode, short_dte_in, long_dte_in,
         if not exps:
             raise ValueError(f"No expirations for {symbol}. Try Manual DTEs.")
 
-        # Map expiration → DTE, filter 5-60 range
+        # Map expiration → DTE, filter range (wider when asym_lc enabled)
+        max_dte_range = 90 if asym_lc else 60
         exp_dte_map = {}
         for e in exps:
             try:
                 d = (datetime.date.fromisoformat(e) - today).days
-                if 5 <= d <= 60:
+                if 5 <= d <= max_dte_range:
                     exp_dte_map[e] = d
             except Exception:
                 continue
         if not exp_dte_map:
-            raise ValueError("No expirations in 5-60 DTE range.")
+            raise ValueError(f"No expirations in 5-{max_dte_range} DTE range.")
 
         # Load each expiration chain ONCE
         chain_by_exp = {}
@@ -282,17 +292,36 @@ def compute(symbol, step, mode, short_dte_in, long_dte_in,
                 sm_pl = build_smile_curve(cl["puts"], spot)
                 sm_cl = build_smile_curve(cl["calls"], spot)
 
+                # Asymmetric LC DTE: find chain at ~1.5× long DTE
+                lc_dte_arg = None
+                sm_cl_lc = None
+                exp_lc = l_exp
+                if asym_lc:
+                    lc_target = round(l_dte * 1.5)
+                    cands = [(e, chain_by_exp[e]["dte_actual"])
+                             for e in all_exps
+                             if chain_by_exp[e]["dte_actual"] >= lc_target]
+                    if cands:
+                        best_lc_exp = min(cands, key=lambda x: x[1])
+                        lc_chain = chain_by_exp[best_lc_exp[0]]
+                        lc_dte_arg = lc_chain["dte_actual"]
+                        sm_cl_lc = build_smile_curve(lc_chain["calls"], spot)
+                        exp_lc = best_lc_exp[0]
+
                 res = build(bias_spot, r, q, iv, step,
                             put_delta, call_delta,
                             s_dte, l_dte,
                             sm_ps, sm_pl, sm_cs, sm_cl, wing,
-                            iv_floor, fast=True)
+                            iv_floor, fast=True,
+                            lc_long_dte=lc_dte_arg,
+                            smile_call_lc=sm_cl_lc)
                 if res is None:
                     continue
 
                 sc_val = score(res, spot)
                 res["exp_short"] = s_exp
                 res["exp_long"]  = l_exp
+                res["exp_lc"]    = exp_lc
                 res["short_dte"] = s_dte
                 res["long_dte"]  = l_dte
                 res["symbol"] = symbol; res["spot"] = spot
@@ -325,14 +354,31 @@ def compute(symbol, step, mode, short_dte_in, long_dte_in,
             sm_pl_c = build_smile_curve(cl_c["puts"], spot)
             sm_cs_c = build_smile_curve(cs_c["calls"], spot)
             sm_cl_c = build_smile_curve(cl_c["calls"], spot)
+
+            # Asym LC for full rebuild
+            lc_dte_c = None; sm_cl_lc_c = None; exp_lc_c = combo["_l_exp"]
+            if asym_lc:
+                lc_target = round(cl_c["dte_actual"] * 1.5)
+                cands = [(e, chain_by_exp[e]["dte_actual"])
+                         for e in all_exps
+                         if chain_by_exp[e]["dte_actual"] >= lc_target]
+                if cands:
+                    be = min(cands, key=lambda x: x[1])
+                    lc_dte_c = chain_by_exp[be[0]]["dte_actual"]
+                    sm_cl_lc_c = build_smile_curve(chain_by_exp[be[0]]["calls"], spot)
+                    exp_lc_c = be[0]
+
             full = build(bias_spot, r, q, iv, step,
                          put_delta, call_delta,
                          cs_c["dte_actual"], cl_c["dte_actual"],
                          sm_ps_c, sm_pl_c, sm_cs_c, sm_cl_c, wing,
-                         iv_floor, fast=False)
+                         iv_floor, fast=False,
+                         lc_long_dte=lc_dte_c,
+                         smile_call_lc=sm_cl_lc_c)
             if full:
                 full["exp_short"] = combo["_s_exp"]
                 full["exp_long"] = combo["_l_exp"]
+                full["exp_lc"] = exp_lc_c
                 full["short_dte"] = cs_c["dte_actual"]
                 full["long_dte"] = cl_c["dte_actual"]
                 full["symbol"] = symbol; full["spot"] = spot
@@ -352,15 +398,29 @@ def compute(symbol, step, mode, short_dte_in, long_dte_in,
         sm_cs = build_smile_curve(cs["calls"], spot)
         sm_cl = build_smile_curve(cl["calls"], spot)
 
+        lc_dte_m = None; sm_cl_lc_m = None; exp_lc_m = cl["expiration"]
+        if asym_lc:
+            lc_target = round(cl["dte_actual"] * 1.5)
+            try:
+                cl_lc, _, _ = resolve_options_chain(symbol, lc_target)
+                lc_dte_m = cl_lc["dte_actual"]
+                sm_cl_lc_m = build_smile_curve(cl_lc["calls"], spot)
+                exp_lc_m = cl_lc["expiration"]
+            except Exception:
+                pass  # fallback to same DTE
+
         best = build(bias_spot, r, q, iv, step,
                      put_delta, call_delta,
                      cs["dte_actual"], cl["dte_actual"],
                      sm_ps, sm_pl, sm_cs, sm_cl, wing,
-                     iv_floor)
+                     iv_floor,
+                     lc_long_dte=lc_dte_m,
+                     smile_call_lc=sm_cl_lc_m)
         if best is None:
             raise ValueError("Could not construct position.")
         best["exp_short"] = cs["expiration"]
         best["exp_long"]  = cl["expiration"]
+        best["exp_lc"]    = exp_lc_m
         best["short_dte"] = cs["dte_actual"]
         best["long_dte"]  = cl["dte_actual"]
         best["dte_scan"]  = None
@@ -399,7 +459,8 @@ def display(res):
         {"Leg": "Long Call",  "Strike": f"{res['lc_k']:,.0f}",
          "Delta": f"{res['lc']['delta']:.3f}", "IV": f"{res['iv_lc']*100:.1f}%",
          "Price": f"${res['lc']['price']:.2f}", "Qty": "+1",
-         "DTE": res["long_dte"], "Exp": res["exp_long"]},
+         "DTE": res.get("lc_long_dte", res["long_dte"]),
+         "Exp": res.get("exp_lc", res["exp_long"])},
     ]), use_container_width=True, hide_index=True)
 
     # Greeks
@@ -473,7 +534,7 @@ def display(res):
          "expiration": res["exp_long"], "long": True, "qty": 1,
          "price": res["lp"]["price"]},
         {"strike": res["lc_k"], "option_type": "call",
-         "expiration": res["exp_long"], "long": True, "qty": 1,
+         "expiration": res.get("exp_lc", res["exp_long"]), "long": True, "qty": 1,
          "price": res["lc"]["price"]},
     ]
     e1, e2 = st.columns(2)
@@ -513,7 +574,7 @@ def main():
     st.caption("Asymmetric Put + Call Diagonal. "
                "Wide DTE spread for theta edge and crash protection.")
 
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
         symbol = st.text_input("Symbol", value="^SPX").upper()
     with c2:
@@ -527,6 +588,12 @@ def main():
     with c4:
         mode = st.radio("Mode", ["Auto", "Manual DTEs"],
                          horizontal=True)
+    with c5:
+        asym_lc = st.toggle("Asym LC DTE", value=False,
+            help="Give the Long Call a longer DTE (1.5× the Long Put DTE). "
+                 "Adds extra vega on the call side to compensate for "
+                 "IV drops during rallies. Turns DD into a 'Crawling Crab Light'. "
+                 "The LC can be reused for multiple short cycles.")
 
     if mode == "Manual DTEs":
         mc1, mc2 = st.columns(2)
@@ -575,7 +642,7 @@ def main():
             try:
                 r = compute(symbol, step, mode, short_dte, long_dte,
                             put_delta, call_delta, bias, wing,
-                            iv_floor / 100.0)
+                            iv_floor / 100.0, asym_lc)
                 st.session_state["dd_result"] = r
                 st.session_state["dd_selected"] = 0
             except Exception as e:

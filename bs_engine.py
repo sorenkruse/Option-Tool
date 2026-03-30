@@ -522,6 +522,15 @@ def optionstrat_url(symbol: str, legs: list) -> str | None:
     parts = []
     for leg in legs:
         strike = int(float(leg["strike"]))
+
+        # Snap strike to valid increment for the exchange
+        # SPX/SPXW: 5-point near ATM, 25-point far OTM
+        # To be safe, always round to nearest 5
+        if leg_sym in ("SPXW", "SPX", "NDXP", "NDX"):
+            strike = round(strike / 5) * 5
+        elif leg_sym in ("SPY", "QQQ", "IWM"):
+            strike = round(strike)  # $1 increments
+
         qty = leg.get("qty", 1)
         is_long = leg.get("long", True)
 
