@@ -57,10 +57,11 @@ with c2:
               "3-scenario P&L (Full / Half / Flat) with weighted EV.",
               [("Scanner", "tag-scan"), ("Forecast", "tag-analyze")])
 with c3:
-    tool_card("11_Verticals.py", "Verticals",
-              "All 4 vertical spread types: Bull Put, Bear Call (credit), "
-              "Bull Call, Bear Put (debit). Same conviction model. "
-              "Diagonal Spread toggle for +20% LP DTE offset.",
+    tool_card("15_IronCondor.py", "Iron Condor",
+              "Forecast-driven asymmetric Iron Condor. "
+              "Profit side at conviction-based delta, "
+              "risk side placed beyond target. "
+              "Asymmetric widths, 4-scenario P&L, DTE optimization.",
               [("Scanner", "tag-scan"), ("Forecast", "tag-analyze")])
 
 # ── Strategy Builders ──
@@ -101,7 +102,11 @@ with c2:
               "Theta efficiency and zone width scoring.",
               [("Builder", "tag-build")])
 with c3:
-    st.empty()
+    tool_card("11_Spreads.py", "Spreads",
+              "Vertical and diagonal spread scanner. "
+              "4 delta inputs, all spread types. "
+              "Diagonal toggle for credit long leg +20% DTE.",
+              [("Scanner", "tag-scan")])
 
 # ── Position Management ──
 st.markdown('<div class="section-head">Position Management</div>',

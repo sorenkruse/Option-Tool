@@ -44,8 +44,12 @@ PAGE_INFO = {
     "Prognose": "Forecast-driven scanner with conviction model. "
                 "Enter your directional view (move %, DTE, conviction) "
                 "and find the best single-leg option. 3-scenario P&L.",
-    "Verticals": "Vertical spread scanner (Bull Put, Bear Call, Bull Call, Bear Put). "
-                 "Same forecast model as Prognose, applied to 2-leg spreads.",
+    "Spreads": "Vertical and diagonal spread scanner with 4 delta inputs. "
+               "Bull Put, Bear Call (credit), Bull Call, Bear Put (debit). "
+               "Diagonal Spread toggle for credit long leg +20% DTE offset.",
+    "Iron Condor": "Forecast-driven asymmetric Iron Condor. "
+                    "Skewed positioning: profit side at conviction delta, "
+                    "risk side beyond target price. 4-scenario P&L.",
     "Crawling Crab": "Trend-following: LEAPS + Short Diagonal + Credit Spread. "
                      "Rolling short premium finances the core long position. "
                      "Auto-DTE optimization.",
@@ -77,7 +81,8 @@ PAGES = [
     ("Home",              "0_Home.py"),
     ("Optimizer",         "4_Optimizer.py"),
     ("Prognose",          "10_Prognose.py"),
-    ("Verticals",         "11_Verticals.py"),
+    ("Spreads",           "11_Spreads.py"),
+    ("Iron Condor",       "15_IronCondor.py"),
     ("Crawling Crab",     "12_CrawlingCrab.py"),
     ("Lizards",           "14_Lizards.py"),
     ("Stock Replacement", "13_StockReplacement.py"),
