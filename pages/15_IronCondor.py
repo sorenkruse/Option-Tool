@@ -557,18 +557,21 @@ def main():
 
     c6, c7, c8 = st.columns(3)
     with c6:
-        diag_spread = st.toggle("Diagonal Spread", value=True,
-            help="Long legs get +20% more DTE. Better IV protection.")
+        diag_spread = st.toggle("Diagonal Spread", value=False,
+            help="Long legs get +20% more DTE. "
+                 "Falls back to same DTE if credit turns negative.")
     with c7:
-        profit_w = st.number_input("Profit Width (steps)", value=1,
+        profit_w = st.number_input("Profit Width (steps)", value=2,
             min_value=1, max_value=4,
-            help="Width of profit-side spread in strike steps. "
-                 "Wider = more cushion if wrong direction.")
+            help="Width of the PROFIT-side spread (opposite to move direction). "
+                 "Wider = more cushion if your forecast is wrong. "
+                 "This is the safe side that benefits from the expected move.")
     with c8:
         risk_w = st.number_input("Risk Width (steps)", value=1,
             min_value=1, max_value=4,
-            help="Width of risk-side spread in strike steps. "
-                 "Narrower = less max loss on the move side.")
+            help="Width of the RISK-side spread (in the move direction). "
+                 "Narrower = less max loss if the move overshoots your target. "
+                 "This side is placed beyond your target price.")
 
     if st.button("Build Iron Condor", type="primary", use_container_width=True):
         with st.spinner("Scanning configurations..."):
