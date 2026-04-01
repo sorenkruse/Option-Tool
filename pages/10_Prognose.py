@@ -97,21 +97,14 @@ def calc_pop(spot, strike, T, r, iv, q, opt_type, is_long, premium):
 
 def scan_options(spot, r, q, iv_atm, target_spot, target_iv,
                  forecast_dte, strike_step, expirations_data,
-                 scan_dtes, conviction=0.5):
-    """
-    Scan all single-leg options across strikes and DTEs.
-
-    conviction: 0.0-1.0, determines scenario weights:
-        Full move weight  = 0.15 + 0.45 * conviction
-        Half move weight  = 0.25 + 0.10 * conviction
-        Flat weight       = 0.60 - 0.55 * conviction
-    """
+                 scan_dtes, conviction=1.0):
+    """Scan all single-leg options across strikes and DTEs."""
     results = []
 
-    # Scenario weights from conviction
-    w_full = 0.15 + 0.45 * conviction
-    w_half = 0.25 + 0.10 * conviction
-    w_flat = 1.0 - w_full - w_half
+    # Fixed scenario weights (100% conviction)
+    w_full = 0.60
+    w_half = 0.35
+    w_flat = 0.05
 
     # Scenario spots and IVs
     half_spot = spot + (target_spot - spot) * 0.5
@@ -296,27 +289,23 @@ def display(res):
     target = res["target_spot"]
     move_pct = res["move_pct"]
 
+    # Fixed weights (100% conviction)
+    w_full = 0.60
+    w_half = 0.35
+    w_flat = 0.05
+
     st.markdown("---")
     st.markdown(f"### {res['symbol']} @ {spot:,.2f}  |  VIX {res['vix']:.1f}")
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Target", f"{target:,.0f}", f"{move_pct:+.1f}%",
               help="Projected spot price = current spot × (1 + move%)")
     m2.metric("IV Now", f"{res['iv_now']*100:.1f}%",
               help="Current implied volatility from VIX")
     m3.metric("IV Projected", f"{res['iv_target']*100:.1f}%",
               f"{(res['iv_target']-res['iv_now'])*100:+.1f}%",
-              help="Projected IV at target spot. Drops increase IV (~4pts/10%), "
-                   "rallies decrease IV (~2.5pts/10%). Asymmetric like real markets.")
-    conv = res.get("conviction", 0.5)
-    w_full = 0.15 + 0.45 * conv
-    w_half = 0.25 + 0.10 * conv
-    w_flat = 1.0 - w_full - w_half
-    m4.metric("Conviction", f"{conv*100:.0f}%",
-              help="Your confidence level. Determines how much weight "
-                   "the full-move scenario gets vs. flat (no move).")
-    m5.metric("Weights", f"{w_full:.0%}/{w_half:.0%}/{w_flat:.0%}",
-              help="Scenario weights: Full Move / Half Move / Flat. "
-                   "These weight the 3 P&L scenarios into the Weighted P&L and EV.")
+              help="Projected IV at target spot.")
+    m4.metric("Spreads Scanned", f"{len(res.get('all_results', []))}",
+              help="Total options evaluated across all DTEs.")
 
     df = pd.DataFrame(res["all_results"])
     if df.empty:
@@ -559,7 +548,7 @@ def display(res):
 # ── Compute ──────────────────────────────────────────────────────────────
 
 def compute(symbol, move_pct, forecast_dte, strike_step, scan_dte_targets,
-            conviction=0.5):
+            conviction=1.0):
     spot, _ = resolve_spot_price(symbol)
     q = get_dividend_yield(symbol)
     r = get_risk_free_rate(forecast_dte)
@@ -638,7 +627,7 @@ def main():
     st.caption("Forecast-driven options scanner. "
                "Enter your directional view and find the best option to express it.")
 
-    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         symbol = st.text_input("Symbol", value="^SPX",
             help="Underlying to scan. ^SPX uses SPXW options via Yahoo Finance, "
@@ -659,16 +648,6 @@ def main():
                  "Options are scanned at 3 DTEs: this value, ~14d, and ~30d. "
                  "Shorter forecast = more theta impact on results.")
     with c4:
-        conviction = st.number_input("Conviction %", value=50,
-            min_value=10, max_value=90, step=10,
-            help="How confident you are in your forecast. Controls scenario weighting:\n"
-                 "- Full Move: your forecast hits exactly\n"
-                 "- Half Move: only 50% of expected move\n"
-                 "- Flat: market doesn't move, only theta works\n\n"
-                 "Low conviction (20%): 24% Full / 27% Half / 49% Flat → favors short options (theta income)\n"
-                 "Medium (50%): 38% Full / 30% Half / 32% Flat → balanced\n"
-                 "High (80%): 51% Full / 33% Half / 16% Flat → favors long options (directional bet)")
-    with c5:
         default_step = 25 if "SPX" in symbol else 5
         strike_step = st.number_input("Strike Step", value=default_step,
             min_value=1, max_value=50,
@@ -685,7 +664,7 @@ def main():
             try:
                 result = compute(symbol, move_pct, forecast_dte,
                                   strike_step, scan_targets,
-                                  conviction / 100.0)
+                                  conviction=1.0)
                 st.session_state["prog_result"] = result
             except Exception as e:
                 st.error(f"Error: {e}")

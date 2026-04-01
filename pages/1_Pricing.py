@@ -207,25 +207,26 @@ def main():
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
     st.title("Options Pricing Tool")
 
-    # --- Sidebar ---
-    with st.sidebar:
-        st.markdown("**Parameters**")
+    # --- Parameters in main area ---
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    with c1:
         ticker = st.text_input("Ticker", value="^SPX",
                                help="e.g. SPY, ^SPX, AAPL, MSFT")
+    with c2:
         strike = st.number_input("Strike", value=6800.0, min_value=0.01, step=5.0,
-                                  help="Target strike price. Nearest available strike from the chain will be used.")
+                                  help="Target strike price.")
+    with c3:
         dte = st.number_input("DTE", value=30, min_value=1, max_value=1095, step=1,
-                               help="Days to expiration. The closest available expiration will be selected.")
-
+                               help="Days to expiration.")
+    with c4:
         rate_mode = st.radio("Risk-Free Rate", ["Auto", "Manual"], horizontal=True,
-                              help="Auto fetches Treasury yields matched to DTE. Manual lets you override.")
-        manual_rate = None
-        if rate_mode == "Manual":
-            manual_rate = st.number_input("Rate (%)", value=4.5, min_value=0.0,
-                                          max_value=20.0, step=0.1,
-                                          help="Annual risk-free rate for BS pricing.") / 100.0
+                              help="Auto fetches Treasury yields. Manual overrides.")
+    manual_rate = None
+    if rate_mode == "Manual":
+        manual_rate = st.number_input("Rate (%)", value=4.5, min_value=0.0,
+                                      max_value=20.0, step=0.1) / 100.0
 
-        run = st.button("Calculate", type="primary", use_container_width=True)
+    run = st.button("Calculate", type="primary", use_container_width=True)
 
     # --- Main ---
     if run:

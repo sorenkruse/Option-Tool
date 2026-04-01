@@ -40,29 +40,44 @@ def tool_card(page_file, title, desc, tags):
         st.markdown(tag_html, unsafe_allow_html=True)
 
 
+st.markdown('<div class="section-head">Decision Support</div>',
+            unsafe_allow_html=True)
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    tool_card("16_DecisionMatrix.py", "Decision Matrix",
+              "Enter your market outlook (direction + timeframe) and get "
+              "ranked strategy recommendations. Considers IV regime, "
+              "trade type (credit/debit), and links to the right tools.",
+              [("Analysis", "tag-analyze")])
+with c2:
+    st.empty()
+with c3:
+    st.empty()
+
 # ── Scanners & Forecasting ──
 st.markdown('<div class="section-head">Scanners & Forecasting</div>',
             unsafe_allow_html=True)
 
 c1, c2, c3 = st.columns(3)
 with c1:
-    tool_card("4_Optimizer.py", "Optimizer",
-              "PoP + Target-Zone scoring for single options. "
-              "Finds the best risk/reward across all strikes and DTEs.",
-              [("Scanner", "tag-scan")])
-with c2:
     tool_card("10_Prognose.py", "Prognose",
-              "Forecast-driven scanner with conviction model. "
-              "Enter move %, time horizon, conviction. "
+              "Forecast-driven single-option scanner. "
+              "Enter expected move % and time horizon. "
               "3-scenario P&L (Full / Half / Flat) with weighted EV.",
               [("Scanner", "tag-scan"), ("Forecast", "tag-analyze")])
-with c3:
+with c2:
     tool_card("15_IronCondor.py", "Iron Condor",
               "Forecast-driven asymmetric Iron Condor. "
-              "Profit side at conviction-based delta, "
-              "risk side placed beyond target. "
+              "Profit side OTM, risk side placed beyond target. "
               "Asymmetric widths, 4-scenario P&L, DTE optimization.",
               [("Scanner", "tag-scan"), ("Forecast", "tag-analyze")])
+with c3:
+    tool_card("11_Spreads.py", "Spreads",
+              "Vertical and diagonal spread scanner. "
+              "4 delta inputs, all spread types. "
+              "Diagonal toggle for credit long leg +20% DTE.",
+              [("Scanner", "tag-scan")])
 
 # ── Strategy Builders ──
 st.markdown('<div class="section-head">Strategy Builders</div>',
@@ -102,11 +117,7 @@ with c2:
               "Theta efficiency and zone width scoring.",
               [("Builder", "tag-build")])
 with c3:
-    tool_card("11_Spreads.py", "Spreads",
-              "Vertical and diagonal spread scanner. "
-              "4 delta inputs, all spread types. "
-              "Diagonal toggle for credit long leg +20% DTE.",
-              [("Scanner", "tag-scan")])
+    st.empty()
 
 # ── Position Management ──
 st.markdown('<div class="section-head">Position Management</div>',
@@ -182,15 +193,21 @@ with st.expander("Typical Workflow"):
 
 with st.expander("Key Concepts"):
     st.markdown("""
-**Diagonal Spread Toggle** -- Verticals, Crawling Crab, Lizards.
+**Diagonal Spread Toggle** -- Spreads, Iron Condor, Crawling Crab, Lizards.
 Long leg gets +20% more DTE. Better vega protection in IV spikes.
+Only applies to credit spreads (not debit spreads).
 
-**Conviction Model** -- Prognose, Verticals.
-Weights 3 scenarios (Full / Half / Flat) by confidence level.
+**3-Scenario P&L** -- Prognose, Iron Condor.
+Full Move (your forecast hits), Half Move (50% of expected), Flat (no move).
+Weighted P&L: 60% Full / 35% Half / 5% Flat.
 
 **Asym LC DTE** -- Double Diagonal.
 Long Call gets 1.5x Long Put DTE. Compensates IV asymmetry on rallies.
 
 **Cycle Economics** -- Crawling Crab, Lizards.
 Measures how many short-DTE cycles (closed at 50%) fund the core long.
+
+**IV Regime** -- Decision Matrix.
+VIX-based classification: Low (<15), Normal (15-22), High (22-32), Extreme (>32).
+Drives strategy selection: buy in low IV, sell in high IV.
     """)

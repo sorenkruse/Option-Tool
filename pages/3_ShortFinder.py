@@ -62,42 +62,32 @@ def round_to_step(val, step):
 # Find strike by target delta using smile IV
 # ---------------------------------------------------------------------------
 
-def find_strike_by_delta(target_delta, S, T, r, q, smile_df, opt_type, step):
+def find_strike_by_delta(target_delta, S, T, r, q, smile_df, opt_type, step,
+                         fallback_iv=0.20):
     """
     Find the strike closest to the target delta, using IV from the smile curve.
-
-    For each candidate strike on the grid:
-    1. Look up IV from the smile at that strike
-    2. Compute delta with BS
-    3. Pick the strike with the smallest delta error
-
-    Returns (strike, iv_used, delta_actual).
     """
-    # Candidate strikes: range around spot
     if opt_type == "call":
-        # Short calls: OTM = above spot
         k_min = round_to_step(S, step)
         k_max = round_to_step(S * 1.4, step)
     else:
-        # Short puts: OTM = below spot
         k_min = round_to_step(S * 0.6, step)
         k_max = round_to_step(S, step)
 
     candidates = np.arange(k_min, k_max + step, step)
     if len(candidates) == 0:
-        return S, 0.15, target_delta
+        return S, fallback_iv, target_delta
 
     best_k = S
-    best_iv = 0.15
+    best_iv = fallback_iv
     best_delta = 0
     min_diff = float("inf")
 
     for k in candidates:
-        # Get IV from smile for this strike
         iv = interpolate_smile_iv(smile_df, k)
         if np.isnan(iv) or iv <= 0.01:
-            continue
-
+            iv = fallback_iv  # use fallback instead of skipping
+        
         try:
             d = bs.delta(S, k, T, r, iv, q, opt_type)
         except Exception:
@@ -202,7 +192,8 @@ def _compute(symbol, dte_input, target_delta):
     S = imp_data["implied_spot"] * scale if spy_fallback else imp_data["implied_spot"]
 
     # ATM IV
-    atm_iv = get_atm_iv(chain, working_spot)
+    atm_iv_data = get_atm_iv(chain, working_spot)
+    atm_iv = atm_iv_data.get("avg_iv", np.nan) if isinstance(atm_iv_data, dict) else atm_iv_data
 
     # Smile curves
     call_smile = build_smile_curve(chain["calls"], working_spot)
@@ -217,13 +208,14 @@ def _compute(symbol, dte_input, target_delta):
             put_smile = put_smile.copy()
             put_smile["strike"] = put_smile["strike"] * scale
 
-    # Find strikes
+    # Find strikes (use ATM IV as fallback if smile interpolation fails)
     step = get_strike_step(symbol, S)
+    fb_iv = atm_iv if atm_iv and atm_iv > 0.01 else vix / 100.0
 
     call_k, call_iv, call_delta = find_strike_by_delta(
-        target_delta, S, T, r, q, call_smile, "call", step)
+        target_delta, S, T, r, q, call_smile, "call", step, fb_iv)
     put_k, put_iv, put_delta = find_strike_by_delta(
-        target_delta, S, T, r, q, put_smile, "put", step)
+        target_delta, S, T, r, q, put_smile, "put", step, fb_iv)
 
     # Compute full Greeks
     call_res = bs.calculate_all(S, call_k, T, r, call_iv, q, "call")
@@ -234,12 +226,20 @@ def _compute(symbol, dte_input, target_delta):
     put_pop = norm.cdf(bs._d2(S, put_k, T, r, put_iv, q)) * 100     # P(S > K)
 
     # Strangle PoP: P(K_put < S_T < K_call) at expiry
-    # = P(S > K_put) - P(S > K_call)
-    # Uses average IV of both legs for consistent lognormal distribution
+    # For straddle (same strike): use breakeven-based PoP instead
     avg_iv = (call_iv + put_iv) / 2
-    d2_put = bs._d2(S, put_k, T, r, avg_iv, q)
-    d2_call = bs._d2(S, call_k, T, r, avg_iv, q)
-    strangle_pop = (norm.cdf(d2_put) - norm.cdf(d2_call)) * 100
+    combined_premium = call_res["price"] + put_res["price"]
+    if call_k == put_k:
+        # Straddle: profit zone = strike ± premium
+        be_low = call_k - combined_premium
+        be_high = call_k + combined_premium
+        d2_low = bs._d2(S, be_low, T, r, avg_iv, q)
+        d2_high = bs._d2(S, be_high, T, r, avg_iv, q)
+        strangle_pop = (norm.cdf(d2_low) - norm.cdf(d2_high)) * 100
+    else:
+        d2_put = bs._d2(S, put_k, T, r, avg_iv, q)
+        d2_call = bs._d2(S, call_k, T, r, avg_iv, q)
+        strangle_pop = (norm.cdf(d2_put) - norm.cdf(d2_call)) * 100
 
     return {
         "S": S, "spot_raw": spot, "vix": vix, "skew": skew,
@@ -282,7 +282,7 @@ def _display(res, symbol):
     m6.metric("SKEW", f"{res['skew']:.1f}" if not np.isnan(res["skew"]) else "N/A")
 
     # ---- Distribution chart ----
-    atm_sigma = res["atm_iv"]["avg_iv"]
+    atm_sigma = res["atm_iv"]
     if np.isnan(atm_sigma) or atm_sigma <= 0:
         atm_sigma = res["vix"] / 100
 

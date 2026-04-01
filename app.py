@@ -38,17 +38,15 @@ if not check_password():
 pages_dir = Path(__file__).parent / "pages"
 
 PAGE_INFO = {
-    "Home": "Overview of all 14 tools with descriptions and workflow guide.",
-    "Optimizer": "PoP + Target-Zone scoring for single options. "
-                 "Finds the best risk/reward across strikes and DTEs.",
-    "Prognose": "Forecast-driven scanner with conviction model. "
-                "Enter your directional view (move %, DTE, conviction) "
-                "and find the best single-leg option. 3-scenario P&L.",
+    "Home": "Overview of all tools with descriptions and workflow guide.",
+    "Decision Matrix": "Strategy recommendation engine. Enter direction, "
+                        "timeframe, and get ranked suggestions with IV context.",
+    "Prognose": "Forecast-driven single-option scanner with 3-scenario P&L.",
     "Spreads": "Vertical and diagonal spread scanner with 4 delta inputs. "
                "Bull Put, Bear Call (credit), Bull Call, Bear Put (debit). "
                "Diagonal Spread toggle for credit long leg +20% DTE offset.",
     "Iron Condor": "Forecast-driven asymmetric Iron Condor. "
-                    "Skewed positioning: profit side at conviction delta, "
+                    "Skewed positioning: profit side OTM, "
                     "risk side beyond target price. 4-scenario P&L.",
     "Crawling Crab": "Trend-following: LEAPS + Short Diagonal + Credit Spread. "
                      "Rolling short premium finances the core long position. "
@@ -79,7 +77,7 @@ PAGE_INFO = {
 
 PAGES = [
     ("Home",              "0_Home.py"),
-    ("Optimizer",         "4_Optimizer.py"),
+    ("Decision Matrix",   "16_DecisionMatrix.py"),
     ("Prognose",          "10_Prognose.py"),
     ("Spreads",           "11_Spreads.py"),
     ("Iron Condor",       "15_IronCondor.py"),

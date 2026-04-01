@@ -356,14 +356,13 @@ def display(res):
                 f"{direction} IC")
 
     # Summary metrics
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Target", f"${target:,.0f}", f"{move_str}")
     m2.metric("IV Now", f"{res['iv']*100:.1f}%")
     iv_proj = project_iv(res['iv'], spot, target)
     iv_chg = iv_proj - res['iv']
     m3.metric("IV Projected", f"{iv_proj*100:.1f}%",
               f"{iv_chg*100:+.1f}%")
-    m4.metric("Conviction", f"{res['conviction']*100:.0f}%")
 
     results = res["all_results"]
 
@@ -479,9 +478,7 @@ def display(res):
 
     # Weighted
     st.caption(f"Weighted P&L: ${pick['pnl_w']*100:+,.0f}  "
-               f"(Full {(0.15+0.45*res['conviction'])*100:.0f}% / "
-               f"Half {(0.25+0.10*res['conviction'])*100:.0f}% / "
-               f"Flat {(1-(0.15+0.45*res['conviction'])-(0.25+0.10*res['conviction']))*100:.0f}%)")
+               f"(Full 60% / Half 35% / Flat 5%)")
 
     # Export
     st.markdown("### Export")
@@ -521,6 +518,94 @@ def display(res):
         if url_c:
             st.markdown(f"[Bear Call Spread]({url_c})")
 
+    # ── P&L Chart ──
+    st.markdown("### P&L Chart")
+    import plotly.graph_objects as go
+
+    sp_k = pick["sp_k"]; lp_k = pick["lp_k"]
+    sc_k = pick["sc_k"]; lc_k = pick["lc_k"]
+    credit = pick["total_credit"]
+    dte_short = pick["dte"]
+    dte_long = pick["long_dte"]
+    forecast_d = res["forecast_dte"]
+
+    chart_low = lp_k - (sc_k - sp_k) * 0.5
+    chart_high = lc_k + (sc_k - sp_k) * 0.5
+    spots = np.linspace(chart_low, chart_high, 200)
+
+    # Trace 1: P&L at expiry (intrinsic)
+    pnls_exp = []
+    for s in spots:
+        put_intr = max(sp_k - s, 0) - max(lp_k - s, 0)
+        call_intr = max(s - sc_k, 0) - max(s - lc_k, 0)
+        pnl = (credit - put_intr - call_intr) * 100
+        pnls_exp.append(pnl)
+
+    # Trace 2: P&L at forecast DTE (with time value + IV projection)
+    T_rem_s = max(dte_short - forecast_d, 1) / 365.0
+    T_rem_l = max(dte_long - forecast_d, 1) / 365.0
+    pnls_fc = []
+    for s in spots:
+        iv_proj = project_iv(res["iv"], spot, s)
+        try:
+            sp_v = bs.calculate_all(s, sp_k, T_rem_s, res["r"], iv_proj, res["q"], "put")["price"]
+            lp_v = bs.calculate_all(s, lp_k, T_rem_l, res["r"], iv_proj, res["q"], "put")["price"]
+            sc_v = bs.calculate_all(s, sc_k, T_rem_s, res["r"], iv_proj, res["q"], "call")["price"]
+            lc_v = bs.calculate_all(s, lc_k, T_rem_l, res["r"], iv_proj, res["q"], "call")["price"]
+            close_cost = (sp_v - lp_v) + (sc_v - lc_v)
+            pnl = (credit - close_cost) * 100
+        except Exception:
+            pnl = pnls_exp[len(pnls_fc)] if len(pnls_fc) < len(pnls_exp) else 0
+        pnls_fc.append(pnl)
+
+    fig = go.Figure()
+
+    # Forecast DTE trace (with time value)
+    fig.add_trace(go.Scatter(
+        x=list(spots), y=pnls_fc, mode="lines",
+        name=f"P&L at {forecast_d}d (forecast)",
+        line=dict(color="#1565c0", width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(21,101,192,0.08)"))
+
+    # Expiry trace
+    fig.add_trace(go.Scatter(
+        x=list(spots), y=pnls_exp, mode="lines",
+        name="P&L at expiry",
+        line=dict(color="#90a4ae", width=1.5, dash="dash")))
+
+    fig.add_hline(y=0, line_dash="dot", line_color="gray")
+
+    # Strike markers
+    for k, label, clr in [
+        (lp_k, f"LP {lp_k:,.0f}", "#e53935"),
+        (sp_k, f"SP {sp_k:,.0f}", "#e53935"),
+        (sc_k, f"SC {sc_k:,.0f}", "#43a047"),
+        (lc_k, f"LC {lc_k:,.0f}", "#43a047"),
+    ]:
+        fig.add_vline(x=k, line_dash="dash", line_color=clr, line_width=1)
+        fig.add_annotation(x=k, y=credit*100*0.95, text=label,
+                            showarrow=False, font=dict(size=10, color=clr))
+
+    # Spot and target
+    fig.add_vline(x=spot, line_dash="dot", line_color="black", line_width=1)
+    fig.add_annotation(x=spot, y=credit*100*1.05, text=f"Spot {spot:,.0f}",
+                        showarrow=False, font=dict(size=10))
+    fig.add_vline(x=target, line_dash="dot", line_color="orange", line_width=1)
+    fig.add_annotation(x=target, y=credit*100*0.85, text=f"Target {target:,.0f}",
+                        showarrow=False, font=dict(size=10, color="orange"))
+
+    fig.update_layout(
+        xaxis_title="Spot Price",
+        yaxis_title="P&L (per contract)",
+        height=380,
+        margin=dict(l=60, r=20, t=30, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(f"Profit zone: {pick['be_put']:,.0f} - {pick['be_call']:,.0f} "
+               f"({pick['zone_width']:.1f}% wide)")
+
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
@@ -530,7 +615,7 @@ def main():
     st.caption("Forecast-driven asymmetric Iron Condor. "
                "Skewed positioning based on your directional view.")
 
-    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
         symbol = st.text_input("Symbol", value="^SPX",
             help="Underlying to trade.").upper()
@@ -545,12 +630,6 @@ def main():
             help="Days until expected move. "
                  "Scanner uses 2-4x this for option DTE.")
     with c4:
-        conviction = st.number_input("Conviction %", value=50,
-            min_value=10, max_value=90, step=10,
-            help="Confidence in the move. "
-                 "High → profit side closer to ATM (more credit). "
-                 "Low → profit side further OTM (safer).")
-    with c5:
         default_step = 25 if "SPX" in symbol else 5
         strike_step = st.number_input("Strike Step", value=default_step,
             min_value=1, max_value=50)
@@ -577,7 +656,7 @@ def main():
         with st.spinner("Scanning configurations..."):
             try:
                 result = compute(symbol, strike_step, move_pct,
-                                  forecast_dte, conviction / 100.0,
+                                  forecast_dte, 1.0,
                                   diag_spread, profit_w, risk_w)
                 st.session_state["ic_result"] = result
             except Exception as e:
