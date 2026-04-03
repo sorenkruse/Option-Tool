@@ -172,7 +172,7 @@ def main():
     # ---- Inputs ----
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
                                 help="Underlying symbol.").upper()
     with c2:
         strike_step = st.number_input("Strike Step", value=5, min_value=1, max_value=50,

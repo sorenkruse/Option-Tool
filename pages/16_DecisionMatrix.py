@@ -348,7 +348,7 @@ def main():
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
             help="Underlying for spot and VIX lookup.").upper()
     with c2:
         outlook = st.selectbox("Outlook",

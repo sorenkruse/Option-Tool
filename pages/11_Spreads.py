@@ -483,7 +483,7 @@ def main():
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
             help="Underlying to scan.").upper()
     with c2:
         default_step = 25 if "SPX" in symbol else 5

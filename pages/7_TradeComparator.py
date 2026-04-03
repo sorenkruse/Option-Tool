@@ -249,7 +249,7 @@ def main():
     st.markdown("### Market Outlook")
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
                                 help="Underlying symbol.").upper()
     with c2:
         move_mode = st.radio("Target as", ["Price", "Percent"], horizontal=True)

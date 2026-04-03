@@ -128,7 +128,7 @@ def main():
     # ---- Inputs ----
     c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
                                 help="Underlying symbol. Use ^SPX for S&P 500 index options.").upper()
     with c2:
         dte_input = st.number_input("DTE", value=40, min_value=1, max_value=365,

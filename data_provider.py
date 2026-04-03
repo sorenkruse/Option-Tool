@@ -14,21 +14,24 @@ Default TTL: 5 minutes for prices, 10 minutes for chains/fundamentals.
 
 import datetime
 import time
+import threading
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 
 # ---------------------------------------------------------------------------
-# TTL Cache
+# TTL Cache with persistent fallback
 # ---------------------------------------------------------------------------
 
 _cache: dict = {}
+_fallback_cache: dict = {}  # Never expires, updated on every successful fetch
 
 # TTL in seconds
 CACHE_TTL_PRICE = 300       # 5 min for spot, VIX, SKEW
-CACHE_TTL_CHAIN = 600       # 10 min for option chains
-CACHE_TTL_FUNDAMENTAL = 900  # 15 min for div yield, risk-free rate, RV
+CACHE_TTL_CHAIN = 900       # 15 min for option chains (increased from 10)
+CACHE_TTL_FUNDAMENTAL = 1800  # 30 min for div yield, risk-free rate
+CACHE_TTL_PREFETCH = 14400  # 4 hours for prefetch data
 
 
 def _cache_get(key: str):
@@ -44,8 +47,123 @@ def _cache_get(key: str):
 
 
 def _cache_set(key: str, value, ttl: int):
-    """Store value with TTL."""
+    """Store value with TTL. Also updates the fallback cache."""
     _cache[key] = (value, time.time() + ttl)
+    _fallback_cache[key] = (value, time.time())  # timestamp for info only
+
+
+def _fallback_get(key: str):
+    """Return fallback value (never expires). Used when live fetch fails."""
+    entry = _fallback_cache.get(key)
+    if entry is None:
+        return None
+    return entry[0]  # value only, ignore timestamp
+
+
+def _fallback_age(key: str) -> float:
+    """Return age of fallback entry in minutes, or -1 if not present."""
+    entry = _fallback_cache.get(key)
+    if entry is None:
+        return -1
+    return (time.time() - entry[1]) / 60.0
+
+
+# ---------------------------------------------------------------------------
+# SPX Prefetch – recurring background loader
+# ---------------------------------------------------------------------------
+
+_prefetch_started = False
+
+# Refresh interval in seconds
+# During US market hours (9:30-16:00 ET): every 10 min
+# Outside market hours: every 60 min
+PREFETCH_INTERVAL_MARKET = 600    # 10 min
+PREFETCH_INTERVAL_OFF = 3600      # 60 min
+
+
+def _is_market_hours():
+    """Check if US markets are currently open (approximate)."""
+    try:
+        import pytz
+        et = datetime.datetime.now(pytz.timezone("US/Eastern"))
+    except ImportError:
+        # No pytz: use UTC - 5 as rough estimate
+        et = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
+    weekday = et.weekday()  # 0=Mon, 6=Sun
+    if weekday >= 5:
+        return False
+    hour = et.hour + et.minute / 60.0
+    return 9.5 <= hour <= 16.0
+
+
+def _do_prefetch():
+    """Load SPX data into cache. Called by background timer."""
+    targets = [
+        ("^SPX", [7, 14, 21, 30, 45]),
+    ]
+    for symbol, dtes in targets:
+        try:
+            resolve_spot_price(symbol)
+        except Exception:
+            pass
+        try:
+            get_vix()
+        except Exception:
+            pass
+        try:
+            exps, ticker = get_available_expirations(symbol)
+            if exps:
+                for dte in dtes:
+                    try:
+                        resolve_options_chain(symbol, dte)
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+        except Exception:
+            pass
+
+
+def _prefetch_loop():
+    """Recurring prefetch: run once, then schedule next run."""
+    _do_prefetch()
+    interval = PREFETCH_INTERVAL_MARKET if _is_market_hours() else PREFETCH_INTERVAL_OFF
+    timer = threading.Timer(interval, _prefetch_loop)
+    timer.daemon = True
+    timer.start()
+
+
+def prefetch_spx():
+    """Start the recurring background prefetch (once per app lifetime)."""
+    global _prefetch_started
+    if _prefetch_started:
+        return
+    _prefetch_started = True
+
+    import threading
+    thread = threading.Thread(target=_prefetch_loop, daemon=True)
+    thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Symbol normalization
+# ---------------------------------------------------------------------------
+
+# Common shorthand → Yahoo Finance ticker mappings
+_SYMBOL_ALIASES = {
+    "SPX": "^SPX",
+    "GSPC": "^GSPC",
+    "NDX": "^NDX",
+    "RUT": "^RUT",
+    "VIX": "^VIX",
+    "DJI": "^DJI",
+}
+
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize user input to Yahoo Finance ticker format.
+    SPX → ^SPX, NDX → ^NDX, etc. Already-prefixed tickers pass through."""
+    s = symbol.strip().upper()
+    return _SYMBOL_ALIASES.get(s, s)
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +222,12 @@ def get_spot_price(ticker: str) -> float:
         _cache_set(key, price, CACHE_TTL_PRICE)
         return price
 
+    # Last resort: fallback cache
+    fb = _fallback_get(key)
+    if fb is not None:
+        age = _fallback_age(key)
+        return fb
+
     raise ValueError(f"Could not fetch price for {ticker}")
 
 
@@ -112,6 +236,7 @@ def resolve_spot_price(ticker: str) -> tuple:
     Resolve spot price, trying multiple ticker variants for indices.
     Returns (price, ticker_used).
     """
+    ticker = normalize_symbol(ticker)
     if ticker.upper() in ("^SPX", "^GSPC", "SPX"):
         for t in SPX_SPOT_TICKERS:
             try:
@@ -267,14 +392,20 @@ def get_options_chain(ticker: str, dte_target: int) -> dict:
     if cached is not None:
         return cached
 
-    tk = yf.Ticker(ticker)
-
     try:
+        tk = yf.Ticker(ticker)
         expirations = tk.options
     except Exception as e:
+        # Try fallback before raising
+        fb = _fallback_get(key)
+        if fb is not None:
+            return fb
         raise ValueError(f"Could not fetch options for {ticker}: {e}")
 
     if not expirations:
+        fb = _fallback_get(key)
+        if fb is not None:
+            return fb
         raise ValueError(f"No options expirations available for {ticker}")
 
     today = datetime.date.today()
@@ -313,6 +444,7 @@ def resolve_options_chain(ticker: str, dte: int) -> tuple:
     Try to get options chain, with SPX fallback logic.
     Returns (chain, ticker_used, is_spy_fallback).
     """
+    ticker = normalize_symbol(ticker)
     is_spx = ticker.upper() in ("^SPX", "^GSPC", "SPX")
 
     if is_spx:
@@ -686,6 +818,7 @@ def fetch_all_data(ticker: str, strike: float, dte: int) -> dict:
 
 def get_available_expirations(ticker: str) -> tuple:
     """Get all available expiration date strings for a ticker (cached)."""
+    ticker = normalize_symbol(ticker)
     key = f"expirations:{ticker.upper()}"
     cached = _cache_get(key)
     if cached is not None:
@@ -694,16 +827,26 @@ def get_available_expirations(ticker: str) -> tuple:
     is_spx = ticker.upper() in ("^SPX", "^GSPC", "SPX")
     tickers_to_try = SPX_OPTIONS_TICKERS + ["SPY"] if is_spx else [ticker]
 
-    for t in tickers_to_try:
-        try:
-            tk = yf.Ticker(t)
-            exps = tk.options
-            if exps:
-                result = (list(exps), t)
-                _cache_set(key, result, CACHE_TTL_CHAIN)
-                return result
-        except Exception:
-            continue
+    import time
+    for attempt in range(3):
+        for t in tickers_to_try:
+            try:
+                tk = yf.Ticker(t)
+                exps = tk.options
+                if exps:
+                    result = (list(exps), t)
+                    _cache_set(key, result, CACHE_TTL_CHAIN)
+                    return result
+            except Exception:
+                continue
+        if attempt < 2:
+            time.sleep(1.5)
+
+    # Fallback: return previously cached data if available
+    fb = _fallback_get(key)
+    if fb is not None:
+        return fb
+
     return [], ticker
 
 

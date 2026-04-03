@@ -190,7 +190,7 @@ def main():
     st.markdown("### Market Outlook")
     c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
                                 help="Underlying symbol.").upper()
     with c2:
         opt_type_sel = st.selectbox("Type", ["Put", "Call"],

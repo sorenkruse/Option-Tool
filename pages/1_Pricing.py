@@ -210,7 +210,7 @@ def main():
     # --- Parameters in main area ---
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        ticker = st.text_input("Ticker", value="^SPX",
+        ticker = st.text_input("Ticker", value="SPX",
                                help="e.g. SPY, ^SPX, AAPL, MSFT")
     with c2:
         strike = st.number_input("Strike", value=6800.0, min_value=0.01, step=5.0,

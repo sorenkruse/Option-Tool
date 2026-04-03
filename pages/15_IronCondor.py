@@ -250,7 +250,8 @@ def compute(symbol, step, move_pct, forecast_dte, conviction,
     except Exception as e:
         raise ValueError(f"Could not fetch expirations: {e}")
     if not exps:
-        raise ValueError(f"No expirations for {symbol}.")
+        raise ValueError(f"No expirations for {symbol}. "
+                          "Yahoo Finance may be rate-limiting. Try again in a moment.")
 
     # Load chains for DTEs from forecast*1.5 to forecast*4
     exp_dte = {}
@@ -617,7 +618,7 @@ def main():
 
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
             help="Underlying to trade.").upper()
     with c2:
         move_pct = st.number_input("Move %", value=-2.0,

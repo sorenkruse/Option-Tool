@@ -576,7 +576,7 @@ def main():
 
     c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX").upper()
+        symbol = st.text_input("Symbol", value="SPX").upper()
     with c2:
         style = st.selectbox("Style", ["Diagonal", "Calendar"],
             help="Diagonal: long strikes offset further OTM. "

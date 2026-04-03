@@ -629,7 +629,7 @@ def main():
 
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
             help="Underlying to scan. ^SPX uses SPXW options via Yahoo Finance, "
                  "with SPY fallback if SPXW unavailable.").upper()
     with c2:

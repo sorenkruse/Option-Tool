@@ -261,7 +261,7 @@ def main():
     st.markdown("### Current Position")
     c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
-        symbol = st.text_input("Symbol", value="^SPX",
+        symbol = st.text_input("Symbol", value="SPX",
                                 help="Underlying symbol.").upper()
     with c2:
         cur_strike = st.number_input("Strike", value=6800.0, min_value=1.0,

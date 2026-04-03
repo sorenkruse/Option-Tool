@@ -154,7 +154,7 @@ def main():
         position_label = st.selectbox("Position", POSITIONS,
                                        help="Long = bought, Short = sold. Long profits when option gains value, Short profits from time decay.")
     with col_ticker:
-        ticker = st.text_input("Underlying", value="^SPX",
+        ticker = st.text_input("Underlying", value="SPX",
                                 help="Ticker symbol. Click Load from Yahoo to auto-fill market data.")
     with col_load:
         st.markdown("<br>", unsafe_allow_html=True)

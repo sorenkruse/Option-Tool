@@ -34,6 +34,14 @@ if not check_password():
     st.stop()
 
 
+# --- Prefetch SPX data in background ---
+try:
+    from data_provider import prefetch_spx
+    prefetch_spx()
+except Exception:
+    pass
+
+
 # --- Page definitions with descriptions ---
 pages_dir = Path(__file__).parent / "pages"
 
