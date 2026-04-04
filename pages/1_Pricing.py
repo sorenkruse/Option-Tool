@@ -208,17 +208,25 @@ def main():
     st.title("Options Pricing Tool")
 
     # --- Parameters in main area ---
-    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1])
     with c1:
         ticker = st.text_input("Ticker", value="SPX",
-                               help="e.g. SPY, ^SPX, AAPL, MSFT")
+                               help="e.g. SPY, SPX, AAPL, MSFT")
     with c2:
-        strike = st.number_input("Strike", value=6800.0, min_value=0.01, step=5.0,
-                                  help="Target strike price.")
+        strike_mode = st.radio("Strike", ["Current", "Manual"], horizontal=True,
+                                help="Current: uses ATM strike from spot price. "
+                                     "Manual: enter a specific strike.")
     with c3:
+        if strike_mode == "Manual":
+            strike = st.number_input("Strike", value=6800.0, min_value=0.01, step=5.0,
+                                      help="Target strike price.")
+        else:
+            strike = None  # will be resolved from spot
+            st.caption("ATM (from spot)")
+    with c4:
         dte = st.number_input("DTE", value=30, min_value=1, max_value=1095, step=1,
                                help="Days to expiration.")
-    with c4:
+    with c5:
         rate_mode = st.radio("Risk-Free Rate", ["Auto", "Manual"], horizontal=True,
                               help="Auto fetches Treasury yields. Manual overrides.")
     manual_rate = None
@@ -232,6 +240,11 @@ def main():
     if run:
         with st.spinner("Fetching data..."):
             try:
+                # Resolve strike from spot if Current mode
+                if strike is None:
+                    from data_provider import resolve_spot_price
+                    spot_price, _ = resolve_spot_price(ticker)
+                    strike = round(spot_price)
                 data = fetch_all_data(ticker, strike, dte)
                 st.session_state["pricing_data"] = data
             except Exception as e:
@@ -475,6 +488,117 @@ def main():
                             use_container_width=True)
         else:
             st.caption("Put IV: No data")
+
+    # --- Strike vs IV: How strikes shift at constant delta ---
+    st.markdown("### Strikes at Constant Delta vs IV")
+    st.caption("Shows how strike levels shift as IV changes, for fixed deltas and DTE.")
+
+    iv_c1, iv_c2 = st.columns(2)
+    with iv_c1:
+        iv_dte = st.number_input("Chart DTE", value=data["actual_dte"],
+                                  min_value=1, max_value=365, key="iv_strike_dte")
+    with iv_c2:
+        iv_step_chart = st.number_input("Chart Step", value=25,
+                                         min_value=1, max_value=50, key="iv_strike_step")
+
+    T_chart = iv_dte / 365.0
+    iv_range = np.arange(0.10, 0.55, 0.01)
+
+    delta_configs = [
+        (-0.30, "put", "Put Δ-0.30", "#e53935"),
+        (-0.20, "put", "Put Δ-0.20", "#ef9a9a"),
+        (-0.10, "put", "Put Δ-0.10", "#ffcdd2"),
+        (0.30, "call", "Call Δ0.30", "#43a047"),
+        (0.20, "call", "Call Δ0.20", "#a5d6a7"),
+        (0.10, "call", "Call Δ0.10", "#c8e6c9"),
+    ]
+
+    import plotly.graph_objects as go
+    fig_iv = go.Figure()
+
+    # Collect data for table
+    table_data = {}
+
+    for d_val, opt_type, label, color in delta_configs:
+        strikes = []
+        for iv_val in iv_range:
+            try:
+                k = round(bs.solve_strike_for_delta(
+                    d_val, implied_spot, T_chart, r, iv_val, q, opt_type
+                ) / iv_step_chart) * iv_step_chart
+                strikes.append(k)
+            except Exception:
+                strikes.append(np.nan)
+
+        # Custom hover with strike, IV, delta
+        hover_texts = [f"Strike: {k:,.0f}<br>IV: {v*100:.1f}%<br>Delta: {d_val}"
+                       if not np.isnan(k) else ""
+                       for k, v in zip(strikes, iv_range)]
+
+        fig_iv.add_trace(go.Scatter(
+            x=[v * 100 for v in iv_range], y=strikes,
+            mode="lines", name=label,
+            line=dict(color=color, width=2),
+            hovertext=hover_texts, hoverinfo="text"))
+
+        # Store for table at selected IV levels
+        table_data[label] = {round(v * 100): k for v, k in zip(iv_range, strikes)}
+
+    # Current IV marker
+    current_iv = data.get("atm_iv", {})
+    if isinstance(current_iv, dict):
+        avg_iv = current_iv.get("avg_iv", data["vix"] / 100)
+    else:
+        avg_iv = current_iv if current_iv and not np.isnan(current_iv) else data["vix"] / 100
+
+    fig_iv.add_vline(x=avg_iv * 100, line_dash="dot", line_color="black", line_width=1)
+    fig_iv.add_annotation(x=avg_iv * 100, y=implied_spot,
+                           text=f"Current IV {avg_iv*100:.1f}%",
+                           showarrow=False, font=dict(size=10))
+
+    fig_iv.add_hline(y=implied_spot, line_dash="dot", line_color="gray", line_width=1)
+    fig_iv.add_annotation(x=30, y=implied_spot,
+                           text=f"Spot {implied_spot:,.0f}",
+                           showarrow=False, font=dict(size=10, color="gray"),
+                           xanchor="left")
+
+    fig_iv.update_layout(
+        xaxis_title="Implied Volatility (%)",
+        yaxis_title="Strike",
+        height=500,
+        margin=dict(l=70, r=20, t=30, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        yaxis=dict(
+            dtick=iv_step_chart * 2,
+            gridcolor="rgba(0,0,0,0.08)",
+            gridwidth=1,
+        ),
+        xaxis=dict(
+            dtick=5,
+            gridcolor="rgba(0,0,0,0.06)",
+        ),
+    )
+
+    st.plotly_chart(fig_iv, use_container_width=True)
+
+    # Data table: strikes at key IV levels
+    st.markdown("#### Strike Table")
+    iv_levels = [10, 15, 20, 25, 30, 35, 40, 50]
+    rows = []
+    for iv_pct in iv_levels:
+        row = {"IV": f"{iv_pct}%"}
+        for label in [c[2] for c in delta_configs]:
+            vals = table_data.get(label, {})
+            k = vals.get(iv_pct, np.nan)
+            if not np.isnan(k):
+                dist = (k - implied_spot) / implied_spot * 100
+                row[label] = f"{k:,.0f} ({dist:+.1f}%)"
+            else:
+                row[label] = "N/A"
+        rows.append(row)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption("Strike at constant delta for each IV level. "
+               "Percentage shows distance from spot.")
 
     # --- Debug: Parameters Used ---
     with st.expander("Debug: Parameters"):
